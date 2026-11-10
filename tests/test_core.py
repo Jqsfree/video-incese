@@ -44,6 +44,7 @@ def test_merge_and_min_length():
           for t in [.25, .75, 1.25, 1.75, 2.25, 2.75, 3.25, 3.75]]
     assert time_intervals(xs, 4, settings) == [(0, 2)]
     assert time_intervals([Observation(.25, "pip", 1, {})], 1, settings) == []
+    assert time_intervals([Observation(.25, "pip", 1, {}), Observation(.75, "pip", 1, {})], 1.19, settings) == [(0.0, 1.19)]
 
 
 def test_bad_cli_arguments(tmp_path):
