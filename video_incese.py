@@ -17,6 +17,8 @@ import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from video_content import semantic_intervals
+
 import cv2
 import numpy as np
 
@@ -41,6 +43,11 @@ class Settings:
     evidence: bool = False
     ollama_model: str | None = None
     dry_run: bool = False
+    content_mode: str = "layout"
+    semantic_step: float = 1.0
+    boundary_tolerance: float = 0.125
+    motion_delta: float = 0.3
+    motion_min: float = 0.02
 
 
 @dataclass(frozen=True)
@@ -267,6 +274,52 @@ def verify_ollama(frame: np.ndarray, model: str) -> tuple[bool, str]:
     return content["match"], str(content.get("reason", ""))
 
 
+def verify_ollama_frames(frames: list[np.ndarray], model: str) -> tuple[bool, str]:
+    """Multi-frame reference/generated-content check. Fail closed on malformed VLM responses.
+
+    The three images are chronological frames from the SAME video and window.
+    """
+    if not model:
+        raise RuntimeError("Semantic mode requires --ollama-model (e.g. qwen3-vl:4b)")
+    encoded = []
+    for frame in frames:
+        ok, jpg = cv2.imencode(".jpg", cv2.resize(frame, (768, 432)), [cv2.IMWRITE_JPEG_QUALITY, 82])
+        if not ok:
+            raise RuntimeError("Cannot encode semantic verification frame")
+        encoded.append(base64.b64encode(jpg.tobytes()).decode("ascii"))
+    prompt = (
+        "Three images show chronological frames from one continuous video interval. "
+        "Evaluate whether there are TWO SIMULTANEOUS VIDEO regions: (1) a 3D reference "
+        "model, motion capture, or reference character/action ANIMATION and (2) an AI-"
+        "GENERATED output video depicting the CORRESPONDING character or action. "
+        "Both regions must show temporal movement across the images. "
+        "A website, browser, AI generator UI, Blender editor/tutorial, static character "
+        "reference image, still collage, gameplay with webcam, text, or two unrelated "
+        "videos DO NOT QUALIFY, even if a PiP border or vertical divider exists. "
+        "When unsure, reject. Return ONLY JSON: match (boolean), "
+        "reference_video (boolean), generated_video (boolean), same_subject (boolean), "
+        "is_software_ui (boolean), reason (brief string)."
+    )
+    request = urllib.request.Request(
+        "http://127.0.0.1:11434/api/chat",
+        data=json.dumps({"model": model, "stream": False, "format": "json",
+                         "options": {"temperature": 0},
+                         "messages": [{"role": "user", "content": prompt, "images": encoded}]}).encode("utf-8"),
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=180) as resp:
+            raw = json.load(resp)
+        verdict = json.loads(raw["message"]["content"])
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise RuntimeError(f"Semantic VLM request/response failure ({model}): {exc}") from exc
+    if not isinstance(verdict, dict) or any(type(verdict.get(k)) is not bool for k in (
+        "match", "reference_video", "generated_video", "same_subject", "is_software_ui")):
+        raise RuntimeError(f"Malformed semantic decision from {model}: {verdict}")
+    valid = all(verdict[k] for k in ("match", "reference_video", "generated_video", "same_subject"))
+    valid = valid and not verdict["is_software_ui"]
+    return valid, str(verdict.get("reason", ""))
+
+
 def export_clip(source: Path, out: Path, start: float, end: float) -> None:
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
@@ -306,6 +359,37 @@ def process_file(source: Path, target: Path, settings: Settings) -> dict:
     observations, sampling = sample_video_with_stats(source, info["duration"], settings)
     warnings = _sampling_warnings(sampling, info["duration"])
     candidates = time_intervals(observations, info["duration"], settings)
+    prepared: list[dict] = []
+    verification_trace: list[dict] = []
+    semantic_failures = 0
+    for candidate_id, (start, end) in enumerate(candidates, 1):
+        if settings.content_mode == "layout":
+            prepared.append({"start": start, "end": end, "source_candidate": candidate_id,
+                             "status": "candidate"})
+            continue
+        if semantic_failures >= MAX_CONSECUTIVE_VERIFY_ERRORS:
+            prepared.append({"start": start, "end": end, "source_candidate": candidate_id,
+                             "status": "verification_skipped",
+                             "error": "Repeated semantic verification failures"})
+            continue
+        try:
+            refined, trace = semantic_intervals(
+                source, start, end, settings, classify, verify_ollama_frames)
+        except (RuntimeError, ValueError) as exc:
+            prepared.append({"start": start, "end": end, "source_candidate": candidate_id,
+                             "status": "verification_error", "error": str(exc)})
+            semantic_failures += 1
+            continue
+        semantic_failures = 0
+        verification_trace.append({"source_candidate": candidate_id,
+                                   "start": start, "end": end, "probes": trace})
+        if not refined:
+            prepared.append({"start": start, "end": end, "source_candidate": candidate_id,
+                             "status": "rejected_semantic"})
+            continue
+        for a, b in refined:
+            prepared.append({"start": a, "end": b, "source_candidate": candidate_id,
+                             "status": "candidate"})
     cap = cv2.VideoCapture(str(source))
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open for verification: {source}")
@@ -313,19 +397,25 @@ def process_file(source: Path, target: Path, settings: Settings) -> dict:
     verify_errors = 0
     verify_aborted = False
     try:
-        for idx, (start, end) in enumerate(candidates, 1):
-            entry: dict = {"start": start, "end": end, "duration": round(end-start, 3), "status": "candidate"}
+        for idx, prepared_entry in enumerate(prepared, 1):
+            start, end = prepared_entry["start"], prepared_entry["end"]
+            entry: dict = {**prepared_entry, "duration": round(end-start, 3)}
             clips.append(entry)
+            if entry["status"] != "candidate":
+                if entry["status"] == "rejected_semantic" and settings.evidence:
+                    frame = read_frame(cap, (start + end) / 2)
+                    _save_evidence(entry, target, source, idx, frame, True, "_rejected")
+                continue
             if verify_aborted:
                 entry["status"] = "verification_skipped"
                 continue
             frame = None
-            if settings.ollama_model or settings.evidence:
+            if (settings.content_mode == "layout" and settings.ollama_model) or settings.evidence:
                 frame = read_frame(cap, (start + end) / 2)
                 if frame is None:
                     entry["status"] = "frame_error"
                     continue
-            if settings.ollama_model:
+            if settings.content_mode == "layout" and settings.ollama_model:
                 try:
                     match, reason = verify_ollama(frame, settings.ollama_model)
                 except RuntimeError as exc:
@@ -357,8 +447,11 @@ def process_file(source: Path, target: Path, settings: Settings) -> dict:
     report = {"input": str(source.resolve()), "video": info, "settings": asdict(settings),
               "sampling": sampling, "warnings": warnings,
               "samples": [asdict(o) for o in observations], "clips": clips,
-              "note": "Geometry-only detection identifies candidates, not confirmed semantic matches. "
-                      "Optional local VLM checks a single midpoint frame, not the whole clip."}
+              "source_candidates": len(candidates), "verification_trace": verification_trace,
+              "note": ("Semantic mode uses multi-frame dual-motion checks and per-window VLM decisions. "
+                       "Boundary locations are estimates, not ground truth."
+                       if settings.content_mode == "semantic" else
+                       "Layout-only mode can include unrelated picture-in-picture content.")}
     target.mkdir(parents=True, exist_ok=True)
     (target / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return report
@@ -377,6 +470,17 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--pip-horizontal", type=float, default=3)
     p.add_argument("--split-threshold", type=float, default=26)
     p.add_argument("--ollama-model", default=None, help="EXPERIMENTAL: local vision model e.g. qwen3-vl:4b")
+    p.add_argument("--content-mode", choices=("layout", "semantic"), default="semantic",
+                   help="semantic (default): require dual video motion and Ollama verification; "
+                        "layout: old geometry-only baseline")
+    p.add_argument("--semantic-step", type=float, default=1.0,
+                   help="Seconds between VLM scan probes in semantic mode")
+    p.add_argument("--boundary-tolerance", type=float, default=0.125,
+                   help="Max duration of semantic boundary bisection bracket")
+    p.add_argument("--motion-delta", type=float, default=0.3,
+                   help="Half-width in seconds of three-frame motion observation")
+    p.add_argument("--motion-min", type=float, default=0.02,
+                   help="Minimum changed pixel ratio in BOTH video regions")
     p.add_argument("--evidence", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     return p
@@ -388,6 +492,14 @@ def main(argv: list[str] | None = None) -> int:
         settings = Settings(**{k: v for k, v in vars(args).items() if k not in {"input", "output"}})
         if not (.1 <= settings.sample_fps <= 30 and settings.min_duration > 0 and settings.merge_gap >= 0):
             raise ValueError("Require 0.1 <= sample-fps <= 30, min-duration > 0, merge-gap >= 0")
+        if not (.2 <= settings.semantic_step <= 10
+                and .025 <= settings.boundary_tolerance <= .5
+                and .1 <= settings.motion_delta <= 1
+                and 0 <= settings.motion_min <= .5):
+            raise ValueError("Invalid semantic step, boundary tolerance, motion delta or motion minimum")
+        if settings.content_mode == "semantic" and not settings.ollama_model:
+            raise ValueError("Semantic mode requires --ollama-model (e.g. qwen3-vl:4b). "
+                             "Use --content-mode layout only for geometry-only diagnostics.")
         source = args.input.expanduser().resolve(strict=True)
         if not source.is_file():
             raise ValueError("--input must be a file")
