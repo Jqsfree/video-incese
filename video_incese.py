@@ -108,6 +108,8 @@ def time_intervals(observations: list[Observation], duration: float, settings: S
             spans[-1][1] = max(spans[-1][1], finish)
         else:
             spans.append([begin, finish])
+    if spans and observations and observations[-1].accepted and duration - (observations[-1].t + dt / 2) <= dt / 2 + 1e-8:
+        spans[-1][1] = duration
     return [(round(a, 3), round(b, 3)) for a, b in spans if b-a >= settings.min_duration - 1e-8]
 
 
