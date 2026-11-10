@@ -41,7 +41,7 @@ video-incese --input "$HOME/Movies/source.mp4" --output "$HOME/Movies/incese-out
 
 **建议先查看 `report.json` 的候选时间范围，再逐段检查 `clips/`。** 时间切分的误差通常取决于采样间隔，导出阶段使用重新编码而非关键帧复制，避免非关键帧边界导致整段错位。
 
-可调整参数：`--layout auto|pip|split`、`--pip-x 0.655`、`--pip-y 0.338`（画中画左上角坐标/视频尺寸）、`--pip-vertical 7`、`--pip-horizontal 7`（越大越严格）、`--split-threshold 26`、`--merge-gap 1.5`（秒）、`--min-duration 0.8`（秒）。目前只支持顶部右侧小窗和中线附近左右分屏，其他布局请先用参数标定或扩展算法。
+可调整参数：`--layout auto|pip|split`、`--pip-x 0.655`、`--pip-y 0.338`（画中画左上角坐标/视频尺寸）、`--pip-vertical 4`、`--pip-horizontal 3`（越大越严格）、`--split-threshold 26`、`--merge-gap 1.5`（秒）、`--min-duration 0.8`（秒）。目前只支持顶部右侧小窗和中线附近左右分屏，其他布局请先用参数标定或扩展算法。
 
 ## 可选：本地视觉模型复核（实验性）
 
