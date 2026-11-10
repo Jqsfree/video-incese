@@ -56,22 +56,35 @@ video-incese --input "$HOME/Movies/source.mp4" --output "$HOME/Movies/incese-vlm
   --ollama-model qwen3-vl:4b --evidence
 ```
 
-仅将候选片段的中间一帧提交至 `127.0.0.1:11434`。当 Ollama 不可用、模型缺失或输出无法解析时会明确报错，不会把模型结果伪装为已验证。Ollama 视觉模型是否正确判定动作对应关系仍需要实际人工标注数据验证。
+仅将候选片段的中间一帧提交至 `127.0.0.1:11434`。当 Ollama 不可用、模型缺失或输出无法解析时，该候选片段会记录为 `verification_error`（**不导出**），其余片段继续处理；连续 3 次失败后剩余片段标记为 `verification_skipped`。可处理完采样和片段时会写出 `report.json`；前置参数或媒体探测失败只输出 stderr。VLM 实际语义准确率仍需人工标注验证。
 
 ## 输出契约
 
 ```text
 incese-out/
   clips/               # 每个有效连续时间段输出一个可播放 MP4（无命中则不创建）
-  evidence/            # --evidence 时每段一个中间帧（无命中则不创建）
-  report.json          # 输入视频信息、参数、所有采样点分数、候选时间戳、导出结果
+  evidence/            # --evidence 时每个候选一个中间帧；被复核拒绝的带 _rejected 后缀
+  report.json          # 输入信息、参数、sampling、warnings、采样分数、片段状态
 ```
 
 文件名包含原始 stem 和精确起止时间；默认覆盖相同文件名输出，建议不同参数使用独立输出目录以方便对比。原始视频不会写入。运行失败时检查 `stderr`；常见原因是 FFmpeg 缺失、编解码器不可用或无权写入输出目录。
 
+## 退出码与失败记录
+
+片段级错误会记入 `report.json`；输入参数、媒体探测及读取初始化等前置失败只输出 stderr。
+
+| 情况 | 记录位置 | 退出码 |
+|---|---|---|
+| 参数或前置环境错误 | stderr | 1 |
+| `frame_error` / `verification_error` / `verification_skipped` / `export_error` | `clips[].status`，stderr | 1 |
+| 孤立采样点不可解码，跳过并继续 | `sampling.failed_times`、`warnings` | 0 |
+| 末尾未分析超过 2 秒（或一个采样间隔） | `sampling.incomplete=true` | 2 |
+
+`rejected_semantic` 表示 VLM 拒绝候选，不属于程序故障；`evidence_error` 目前记入对应片段，但不会导致退出码非零。**本补丁是可靠性修复，不提升内容筛选精度，网页/软件操作画面误收仍然存在。**
+
 ## 验证要求与当前进度
 
-- `pytest`：合成 PiP/分屏/纯单画面与时间区间合并测试。CI 在 macOS、Ubuntu 各两个 Python 版本上执行。
+- `pytest`：合成 PiP/分屏/纯单画面与时间区间合并测试，以及解码失败、VLM 异常、导出失败与拒绝证据测试。CI 在 macOS、Ubuntu 各两个 Python 版本上执行。
 - 样本：四段上传样本用于开发回归，**都为正例**；不能用于证明真实负例精度。未经足够多真实正负例标注，不报告 Precision、Recall 或 F1。
 - 人工验收：每条原始长视频人工标记起止点，比较脚本输出的起止点、误收和漏收；检查声音同步和 MP4 可播放。
 
