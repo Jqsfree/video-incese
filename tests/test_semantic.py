@@ -104,3 +104,27 @@ def test_semantic_vlm_failure_reports_error_and_no_export(make_video, tmp_path, 
     assert result["clips"][0]["status"] == "verification_error"
     assert "mock Ollama unavailable" in result["clips"][0]["error"]
     assert not (out / "clips").exists()
+
+
+@needs_ffmpeg
+def test_process_file_exports_two_refined_segments(make_video, tmp_path, monkeypatch):
+    """Exercise FFmpeg integration after a single layout candidate is split."""
+    src = make_video([(0, 10)], seconds=10)
+    def approved_intervals(path, start, end, settings, classify, verify):
+        return [(0.5, 2.5), (6.0, 8.0)], [
+            {"time": 1.0, "match": True, "reason": "mock approved",
+             "layout": "pip", "reference_motion": .3, "generated_motion": .4,
+             "phase": "scan"}]
+    monkeypatch.setattr(v, "semantic_intervals", approved_intervals)
+    out = tmp_path / "out"
+    result = v.process_file(src, out,
+        v.Settings(sample_fps=2, content_mode="semantic", ollama_model="fake", min_duration=.8))
+    exported = [c for c in result["clips"] if c["status"] == "exported"]
+    assert len(exported) == 2, result["clips"]
+    assert [(c["start"], c["end"]) for c in exported] == [(0.5, 2.5), (6.0, 8.0)]
+    assert [c["source_candidate"] for c in exported] == [1, 1]
+    assert result["source_candidates"] == 1
+    assert len(result["verification_trace"]) == 1
+    assert len(list((out/"clips").glob("*.mp4"))) == 2
+    assert all(abs(v.probe(__import__("pathlib").Path(c["output"]))["duration"] - 2.0) < .15
+               for c in exported)
