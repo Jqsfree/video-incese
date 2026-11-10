@@ -95,7 +95,7 @@ def test_mixed_sequence_finds_separate_spans_and_no_bridging(make_video, tmp_pat
 def test_semantic_vlm_failure_reports_error_and_no_export(make_video, tmp_path, monkeypatch):
     src = make_video([(2, 8)])
     monkeypatch.setattr(content, "motion_pair", lambda *args: (.4, .4))
-    def broken(frames, model):
+    def broken(frames, model, **kwargs):
         raise RuntimeError("mock Ollama unavailable")
     monkeypatch.setattr(v, "verify_ollama_frames", broken)
     out = tmp_path / "out"
@@ -128,3 +128,44 @@ def test_process_file_exports_two_refined_segments(make_video, tmp_path, monkeyp
     assert len(list((out/"clips").glob("*.mp4"))) == 2
     assert all(abs(v.probe(__import__("pathlib").Path(c["output"]))["duration"] - 2.0) < .15
                for c in exported)
+
+
+def test_ollama_performance_request_parameters(monkeypatch):
+    sent = {}
+    raw = {"match": True, "reference_video": True, "generated_video": True,
+           "same_subject": True, "is_software_ui": False, "reason": "matched"}
+    response = {"message": {"content": json.dumps(raw)}}
+
+    def fake_urlopen(request, timeout):
+        sent["body"] = json.loads(request.data.decode("utf-8"))
+        sent["timeout"] = timeout
+        return io.BytesIO(json.dumps(response).encode("utf-8"))
+
+    monkeypatch.setattr(v.urllib.request, "urlopen", fake_urlopen)
+    assert v.verify_ollama_frames([_frame(0)] * 3, "mock:8b",
+                                  timeout=420, num_predict=128, think=False)[0]
+    assert sent["timeout"] == 420
+    assert sent["body"]["think"] is False
+    assert sent["body"]["keep_alive"] == "20m"
+    assert sent["body"]["options"]["num_predict"] == 128
+    assert len(sent["body"]["messages"][0]["images"]) == 3
+
+
+def test_invalid_ollama_timeouts_rejected_early(tmp_path):
+    source = tmp_path / "source.mp4"
+    source.touch()
+    assert v.main(["--input", str(source), "--output", str(tmp_path / "out"),
+                   "--ollama-model", "mock", "--ollama-timeout", "-1"]) == 1
+    assert v.main(["--input", str(source), "--output", str(tmp_path / "out"),
+                   "--ollama-model", "mock", "--ollama-num-predict", "0"]) == 1
+
+
+def test_thinking_only_qwen_vl_tags_require_explicit_opt_in(tmp_path):
+    assert v.is_qwen3_vl_thinking_only("qwen3-vl:8b")
+    assert v.is_qwen3_vl_thinking_only("qwen3-vl:8b-thinking")
+    assert not v.is_qwen3_vl_thinking_only("qwen3-vl:8b-instruct")
+    assert not v.is_qwen3_vl_thinking_only("qwen3-vl:4b-instruct")
+    source = tmp_path / "source.mp4"
+    source.touch()
+    assert v.main(["--input", str(source), "--output", str(tmp_path/"out"),
+                   "--ollama-model", "qwen3-vl:8b"]) == 1

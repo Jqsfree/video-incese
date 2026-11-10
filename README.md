@@ -68,6 +68,30 @@ incese-output/
 
 默认参数：`--sample-fps 2`（布局）、`--semantic-step 1`（语义时间步长）、`--motion-delta .3`（三帧时间半径）、`--motion-min .02`（运动像素比例）、`--boundary-tolerance .125`、`--min-duration .8`、`--merge-gap 2.6`（仅影响原布局候选预筛，语义不跨拒绝窗口合并）、`--layout auto|pip|split`、`--pip-x .655`、`--pip-y .338`。
 
+## 本地 Ollama 推理超时排障（v0.2.1）
+
+v0.2.0 的每次 VLM 请求固定 180 秒；`qwen3-vl:8b` 是 **Thinking-only** 版本，不支持通过 `think:false` 切换到非思考模式。Ollama 维护者确认应换用独立的 `qwen3-vl:8b-instruct`，内存紧张优先 `qwen3-vl:4b-instruct`。v0.2.1 默认发送 `think=false`、`num_predict=192`、模型保活 20 分钟、可配置单请求超时（默认 300 秒）。对于已知 Thinking-only Qwen3-VL 标签默认提前报错并指导改用 Instruct，而不是浪费数次超时。若明确选择 `--ollama-think --ollama-num-predict 2048`，允许慢速试验；绝不悄悄退回仅几何筛选。
+
+```bash
+ollama --version
+ollama list
+ollama ps
+ollama pull qwen3-vl:4b-instruct    # 16GB Mac 上优先试这个
+# 或：ollama pull qwen3-vl:8b-instruct
+curl -sS http://127.0.0.1:11434/api/tags | python -m json.tool | head -60
+
+# 先用短片段或完整视频的较大时间步长做冒烟测试
+video-incese --input "$HOME/Movies/source.mp4" \
+  --output "$HOME/Movies/incese-smoke" \
+  --ollama-model qwen3-vl:4b-instruct \
+  --ollama-timeout 600 --semantic-step 3 \
+  --dry-run
+```
+
+`ollama ps` 的 PROCESSOR 字段可判断是否 100% GPU 或存在 CPU 分担/掉速。可用 `ollama run qwen3-vl:4b-instruct "请只回答 OK"` 区分模型基本加载与三帧视觉处理问题。注意 `--dry-run` **照样执行全部视觉推理**，仅跳过 MP4 导出。较大 `--semantic-step` 只用于烟测，可能漏掉短有效片段，最终抽检建议恢复 `1` 或更小。
+
+仍超时时不要继续对完整原片重试：先检查 Mac 内存压力、GPU 占用、Ollama 模型及版本，测试单帧推理；可考虑 `qwen3-vl:4b-instruct` 或 `qwen3-vl:8b-instruct`，但新模型需下载且不保证更准。提高 timeout 只能避免正常慢推理被截断，不能修复模型卡死/内存不足。具体本地速度与正确率未验证。
+
 ## 故障与质量边界
 
 - `frame_error` / `verification_error` / `verification_skipped` / `export_error`：记录在 report，退出码 **1**。模型失效不会自动转成布局模式或被当作匹配。
