@@ -273,7 +273,7 @@ def verify_ollama(frame: np.ndarray, model: str) -> tuple[bool, str]:
                                        "images": [base64.b64encode(jpg.tobytes()).decode("ascii")]}]}).encode("utf-8"),
         headers={"Content-Type": "application/json"}, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as resp:
+        with urllib.request.urlopen(request, timeout=180) as resp:
             result = json.load(resp)
     except (OSError, ValueError) as exc:
         raise RuntimeError(f"Local Ollama unavailable or returned invalid data ({model}): {exc}") from exc
@@ -324,7 +324,7 @@ def verify_ollama_frames(
                          "messages": [{"role": "user", "content": prompt, "images": encoded}]}).encode("utf-8"),
         headers={"Content-Type": "application/json"}, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=180) as resp:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
             raw = json.load(resp)
         verdict = json.loads(raw["message"]["content"])
     except (OSError, ValueError, TypeError, KeyError) as exc:
