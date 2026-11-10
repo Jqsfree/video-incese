@@ -29,6 +29,14 @@ INCOMPLETE_TAIL_SECONDS = 2.0
 MAX_CONSECUTIVE_VERIFY_ERRORS = 3
 ERROR_STATUSES = frozenset({"frame_error", "verification_error", "verification_skipped", "export_error"})
 
+def is_qwen3_vl_thinking_only(model: str) -> bool:
+    """Ollama official qwen3-vl base tags are thinking-only, NOT hybrid switches."""
+    tag = model.lower().strip()
+    return tag in {"qwen3-vl", "qwen3-vl:latest", "qwen3-vl:2b",
+                   "qwen3-vl:4b", "qwen3-vl:8b"} or (
+        tag.startswith("qwen3-vl:") and "-thinking" in tag
+    )
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -520,6 +528,18 @@ def main(argv: list[str] | None = None) -> int:
         if settings.content_mode == "semantic" and not settings.ollama_model:
             raise ValueError("Semantic mode requires --ollama-model (e.g. qwen3-vl:4b). "
                              "Use --content-mode layout only for geometry-only diagnostics.")
+        if (settings.content_mode == "semantic" and settings.ollama_model
+                and is_qwen3_vl_thinking_only(settings.ollama_model)):
+            if not settings.ollama_think:
+                raise ValueError(
+                    f"{settings.ollama_model} is a Thinking-only Qwen3-VL tag. "
+                    "Ollama cannot disable its thinking using think=false. "
+                    "Use qwen3-vl:4b-instruct or qwen3-vl:8b-instruct. "
+                    "Advanced: --ollama-think --ollama-num-predict 2048 "
+                    "(expect substantially slower inference).")
+            if settings.ollama_num_predict < 1024:
+                raise ValueError("Thinking-only Qwen3-VL needs --ollama-num-predict >= 1024 "
+                                 "to leave room for a JSON answer. Prefer an -instruct model.")
         source = args.input.expanduser().resolve(strict=True)
         if not source.is_file():
             raise ValueError("--input must be a file")

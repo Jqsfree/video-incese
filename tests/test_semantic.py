@@ -158,3 +158,14 @@ def test_invalid_ollama_timeouts_rejected_early(tmp_path):
                    "--ollama-model", "mock", "--ollama-timeout", "-1"]) == 1
     assert v.main(["--input", str(source), "--output", str(tmp_path / "out"),
                    "--ollama-model", "mock", "--ollama-num-predict", "0"]) == 1
+
+
+def test_thinking_only_qwen_vl_tags_require_explicit_opt_in(tmp_path):
+    assert v.is_qwen3_vl_thinking_only("qwen3-vl:8b")
+    assert v.is_qwen3_vl_thinking_only("qwen3-vl:8b-thinking")
+    assert not v.is_qwen3_vl_thinking_only("qwen3-vl:8b-instruct")
+    assert not v.is_qwen3_vl_thinking_only("qwen3-vl:4b-instruct")
+    source = tmp_path / "source.mp4"
+    source.touch()
+    assert v.main(["--input", str(source), "--output", str(tmp_path/"out"),
+                   "--ollama-model", "qwen3-vl:8b"]) == 1
