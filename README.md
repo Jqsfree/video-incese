@@ -1,93 +1,84 @@
 # video-incese
 
-在连续视频中定位并截取 **参考模型/原始动作与生成视频同时出现** 的对比片段，支持右上角画中画（PiP）和左右分屏。专门为用户提供的四段样本布局设定默认参数。不会修改输入文件。
+自动提取 **参考动画/三维模型与对应生成视频同时出现** 的长视频区间，支持画中画和左右分屏。目标是内容共现而非单纯镜头分割。macOS（Apple Silicon/Intel）与 Ubuntu 均可运行。原文件不改动。
 
-> **检测边界：** 默认 OpenCV 仅证明存在目标布局，不能单独证明画面内容确实是对应的模型与生成结果。`--ollama-model` 提供实验性的本地视觉语义复核（仅验证每个候选片段中间的一帧），仍须人工抽检。不提供任何未经测试的生产准确率承诺。
+## v0.2 核心变化
 
-## macOS (Apple Silicon / Intel) 部署
+旧版只识别画面几何布局，网站操作、Blender、静态角色设定图都会误收。**v0.2 默认启用语义模式**，通过三层过滤：
 
-安装 Homebrew（若已安装则跳过），然后执行：
+1. **布局初筛**：OpenCV 检测右上 PiP / 居中左右分屏（保留原来两个阈值检测器）。
+2. **双区域运动 + 多帧内容识别**：同一区间抽取前、中、后 3 帧，分别衡量两个画面区域的运动；两个区域都具有时间变化才交由本地 Ollama 视觉模型，模型按角色/动作对应、两边是否视频、是否软件教程等进行判定。仅凭分屏线不会通过。
+3. **边界细化**：默认每 1 秒做语义判断；有正负判定切换时，对时间点二分重检，默认缩小到 0.125 秒的判定区间；**遇到明确拒绝窗口绝不跨越合并**。这是基于有限采样的边界估计，不是逐帧人工真值，也不能证明每一帧都满足条件。
+
+## macOS 安装
 
 ```bash
 brew install python@3.12 ffmpeg git
-python3.12 --version
-ffmpeg -version
-ffprobe -version
-
 git clone https://github.com/Jqsfree/video-incese.git
 cd video-incese
 python3.12 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
 python -m pip install -e '.[dev]'
 python -m pytest -q
-video-incese --help
 ```
 
-默认只用 CPU 上的 OpenCV，无 CUDA、PyTorch 或云端 API 依赖。M 系列 Mac 可运行。若 `brew` 尚未安装，参考 https://brew.sh/ 的官方说明。
-
-## 先预览检测，再截取
+语义模式依赖本机运行 Ollama，模型由用户明确下载；**无需 CUDA、无云端密钥**。安装 Ollama 后：
 
 ```bash
-# 路径可包含空格和中文；dry-run 不导出片段，只生成 JSON 报告
-video-incese --input "$HOME/Movies/source.mp4" --output "$HOME/Movies/incese-out" --dry-run
-
-# 真正输出：clips/*.mp4 + evidence/*.jpg + report.json
-video-incese --input "$HOME/Movies/source.mp4" --output "$HOME/Movies/incese-out" --evidence
-
-# 更密集采样减少边界误差，CPU 时间会增加
-video-incese --input "$HOME/Movies/source.mp4" --output "$HOME/Movies/incese-out-4fps" --sample-fps 4 --evidence
-```
-
-**建议先查看 `report.json` 的候选时间范围，再逐段检查 `clips/`。** 时间切分的误差通常取决于采样间隔，导出阶段使用重新编码而非关键帧复制，避免非关键帧边界导致整段错位。
-
-可调整参数：`--layout auto|pip|split`、`--pip-x 0.655`、`--pip-y 0.338`（画中画左上角坐标/视频尺寸）、`--pip-vertical 4`、`--pip-horizontal 3`（越大越严格）、`--split-threshold 26`、`--merge-gap 2.6`（秒）、`--min-duration 0.8`（秒）。较长缺口（不超过 `--merge-gap`）只有在期间持续存在弱画中画边界证据时才合并；完全没有边界证据时不合并，避免把真正不含对比画面的片段混入。
-
-目前只支持顶部右侧小窗和中线附近左右分屏，其他布局请先用参数标定或扩展算法。
-
-## 可选：本地视觉模型复核（实验性）
-
-```bash
-# 已安装 Ollama 时（没有则按 https://ollama.com/ 获取 macOS 版本）
 ollama pull qwen3-vl:4b
-# 确认 Ollama 本地服务已启动，模型可用
 ollama list
-video-incese --input "$HOME/Movies/source.mp4" --output "$HOME/Movies/incese-vlm" \
-  --ollama-model qwen3-vl:4b --evidence
 ```
 
-仅将候选片段的中间一帧提交至 `127.0.0.1:11434`。当 Ollama 不可用、模型缺失或输出无法解析时，该候选片段会记录为 `verification_error`（**不导出**），其余片段继续处理；连续 3 次失败后剩余片段标记为 `verification_skipped`。可处理完采样和片段时会写出 `report.json`；前置参数或媒体探测失败只输出 stderr。VLM 实际语义准确率仍需人工标注验证。
+## 先只检测，再实际导出
+
+```bash
+# 推荐：严格内容模式。默认 content-mode=semantic，缺失模型会明确报错而不是退回几何模式
+video-incese --input "$HOME/Movies/source.mp4" \
+  --output "$HOME/Movies/incese-check" \
+  --ollama-model qwen3-vl:4b --dry-run --evidence
+
+# 查看 report.json 中的 clips 和 verification_trace，确认后实际导出
+video-incese --input "$HOME/Movies/source.mp4" \
+  --output "$HOME/Movies/incese-output" \
+  --ollama-model qwen3-vl:4b --evidence
+
+# 需要更多时序采样（更慢、更贵）
+video-incese --input "$HOME/Movies/source.mp4" \
+  --output "$HOME/Movies/incese-dense" \
+  --sample-fps 4 --semantic-step .5 --boundary-tolerance .125 \
+  --ollama-model qwen3-vl:4b --evidence
+
+# 旧算法只作基线调试；不应当视为有效内容分类
+video-incese --input "$HOME/Movies/source.mp4" \
+  --output "$HOME/Movies/incese-layout-only" --content-mode layout --dry-run
+```
+
+输入路径支持中文与空格。每次输出到独立目录以避免旧文件混淆。若已克隆仓库，使用 `git pull --ff-only origin main` 更新，并重新执行 `pip install -e '.[dev]'`。
 
 ## 输出契约
 
 ```text
-incese-out/
-  clips/               # 每个有效连续时间段输出一个可播放 MP4（无命中则不创建）
-  evidence/            # --evidence 时每个候选一个中间帧；被复核拒绝的带 _rejected 后缀
-  report.json          # 输入信息、参数、sampling、warnings、采样分数、片段状态
+incese-output/
+  clips/             # 通过语义检查的连续片段 MP4；无命中时不生成
+  evidence/          # 抽帧证据；被拒绝候选 *_rejected.jpg
+  report.json        # 几何采样、语义探测、起止时间、状态、错误
 ```
 
-文件名包含原始 stem 和精确起止时间；默认覆盖相同文件名输出，建议不同参数使用独立输出目录以方便对比。原始视频不会写入。运行失败时检查 `stderr`；常见原因是 FFmpeg 缺失、编解码器不可用或无权写入输出目录。
+`report.json` 中的 `verification_trace` 记录每个源候选的多帧判定：`time`、`match`、`layout`、`reference_motion`、`generated_motion`、`reason`、`phase`（scan/boundary）。`clips[].source_candidate` 可追溯原始布局区间；一段混合候选可以分成多个 MP4。
 
-## 退出码与失败记录
+默认参数：`--sample-fps 2`（布局）、`--semantic-step 1`（语义时间步长）、`--motion-delta .3`（三帧时间半径）、`--motion-min .02`（运动像素比例）、`--boundary-tolerance .125`、`--min-duration .8`、`--merge-gap 2.6`（仅影响原布局候选预筛，语义不跨拒绝窗口合并）、`--layout auto|pip|split`、`--pip-x .655`、`--pip-y .338`。
 
-片段级错误会记入 `report.json`；输入参数、媒体探测及读取初始化等前置失败只输出 stderr。
+## 故障与质量边界
 
-| 情况 | 记录位置 | 退出码 |
-|---|---|---|
-| 参数或前置环境错误 | stderr | 1 |
-| `frame_error` / `verification_error` / `verification_skipped` / `export_error` | `clips[].status`，stderr | 1 |
-| 孤立采样点不可解码，跳过并继续 | `sampling.failed_times`、`warnings` | 0 |
-| 末尾未分析超过 2 秒（或一个采样间隔） | `sampling.incomplete=true` | 2 |
+- `frame_error` / `verification_error` / `verification_skipped` / `export_error`：记录在 report，退出码 **1**。模型失效不会自动转成布局模式或被当作匹配。
+- 视频末尾未分析超过允许范围：`sampling.incomplete=true`，退出码 **2**；少量孤立解码错误会计入警告。
+- `rejected_semantic` 不是程序故障；`--dry-run` 不导出视频。
+- 几何候选不会覆盖所有布局，尤其是不同位置的画中画、无明显边框或其他分屏形式。
+- 运动门槛会牺牲极低运动参考片段的召回率；摄像机移动、转场也可能造成虚假的运动证据，故仍须视觉模型判断。
+- 视觉模型输出不是人工真值，甚至多帧仍可能误判教程、静态参考或动作对应；**本地实际模型效果和真实端到端 Precision/Recall 尚未经过独立验证，不能声称生产验收通过**。
+- 当正负内容在一个语义采样间隔内快速交替，可能漏掉过短片段；建议缩短 `--semantic-step` 并检查 `verification_trace`。对高价值片段建议人工验收，最大时间精度不能直接等于边界误差。
+- 输出采用 FFmpeg 重新编码，保留可用音轨并使用精确时间戳；输入视频不写入。
 
-`rejected_semantic` 表示 VLM 拒绝候选，不属于程序故障；`evidence_error` 目前记入对应片段，但不会导致退出码非零。**本补丁是可靠性修复，不提升内容筛选精度，网页/软件操作画面误收仍然存在。**
+## 验收
 
-## 验证要求与当前进度
-
-- `pytest`：合成 PiP/分屏/纯单画面与时间区间合并测试，以及解码失败、VLM 异常、导出失败与拒绝证据测试。CI 在 macOS、Ubuntu 各两个 Python 版本上执行。
-- 样本：四段上传样本用于开发回归，**都为正例**；不能用于证明真实负例精度。未经足够多真实正负例标注，不报告 Precision、Recall 或 F1。
-- 人工验收：每条原始长视频人工标记起止点，比较脚本输出的起止点、误收和漏收；检查声音同步和 MP4 可播放。
-
-## 已知限制
-
-目前是基于 **画面几何结构** 的候选片段提取器。缺少视觉语义判断时，其他类型的画中画（游戏直播、人像主播、新闻播报）可能被保留；相同场景的低对比度小窗可能被漏检。`--ollama-model` 仅单帧语义核验，不保证完整片段每一帧都满足要求。对负例准确率和召回率应在用户本地真实长视频上评估后再考虑生产使用。
+先对包含真正正负例的完整长视频标注区间，至少区分：真实模型对照、工具网页、Blender 编辑器、静态参考图、单独生成片段、不相关双视频和正负混合片段。检验误收、漏收与边界偏差，并保留 `report.json` 与 `evidence/`。合成测试和组件级测试并不能证明实际 VLM 精度。

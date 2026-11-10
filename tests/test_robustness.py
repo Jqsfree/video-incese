@@ -26,7 +26,7 @@ def test_unreadable_tail_is_flagged_incomplete_with_exit_code_2(make_video, tmp_
     original = v.read_frame
     monkeypatch.setattr(v, "read_frame", lambda cap, t: None if t > 10 else original(cap, t))
     out = tmp_path / "out"
-    code = v.main(["--input", str(src), "--output", str(out), "--sample-fps", "2", "--dry-run"])
+    code = v.main(["--input", str(src), "--output", str(out), "--sample-fps", "2", "--content-mode", "layout", "--dry-run"])
     data = json.loads((out / "report.json").read_text())
     assert code == 2
     assert data["sampling"]["incomplete"] and data["sampling"]["stopped_early"]
@@ -46,7 +46,7 @@ def test_vlm_error_is_recorded_and_other_candidates_still_processed(make_video, 
     monkeypatch.setattr(v, "verify_ollama", flaky)
     out = tmp_path / "out"
     code = v.main(["--input", str(src), "--output", str(out), "--sample-fps", "2",
-                   "--dry-run", "--ollama-model", "fake"])
+                   "--content-mode", "layout", "--dry-run", "--ollama-model", "fake"])
     data = json.loads((out / "report.json").read_text())
     assert [c["status"] for c in data["clips"]] == ["verification_error", "dry_run"]
     assert "simulated" in data["clips"][0]["error"]
@@ -83,7 +83,7 @@ def test_export_failure_is_recorded_not_raised(make_video, tmp_path, monkeypatch
         raise RuntimeError("ffmpeg clip export failed: simulated")
     monkeypatch.setattr(v, "export_clip", boom)
     out = tmp_path / "out"
-    code = v.main(["--input", str(src), "--output", str(out), "--sample-fps", "2"])
+    code = v.main(["--input", str(src), "--output", str(out), "--sample-fps", "2", "--content-mode", "layout"])
     data = json.loads((out / "report.json").read_text())
     assert data["clips"][0]["status"] == "export_error" and code == 1
 
