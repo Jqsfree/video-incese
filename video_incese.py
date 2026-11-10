@@ -20,6 +20,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+# Robustness policy (see README "退出码与失败记录").
+MAX_CONSECUTIVE_READ_FAILURES = 5
+INCOMPLETE_TAIL_SECONDS = 2.0
+MAX_CONSECUTIVE_VERIFY_ERRORS = 3
+ERROR_STATUSES = frozenset({"frame_error", "verification_error", "verification_skipped", "export_error"})
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -176,28 +182,57 @@ def read_frame(cap: cv2.VideoCapture, t: float) -> np.ndarray | None:
     return frame if ok else None
 
 
-def sample_video(path: Path, duration: float, settings: Settings) -> list[Observation]:
+def sample_video_with_stats(path: Path, duration: float, settings: Settings) -> tuple[list[Observation], dict]:
+    """Sample the video; record unreadable samples, not silently terminate the scan."""
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         raise RuntimeError(f"OpenCV cannot open: {path}")
-    observations = []
+    observations: list[Observation] = []
+    failed: list[float] = []
     step = 1 / settings.sample_fps
+    expected = max(0, math.ceil(duration / step - 0.5 - 1e-9))
+    consecutive = 0
+    last_ok: float | None = None
+    stopped_early = False
     try:
-        index = 0
-        while True:
+        for index in range(expected):
             t = (index + 0.5) * step
-            if t >= duration:
-                break
             frame = read_frame(cap, t)
             if frame is None:
-                break
+                failed.append(round(t, 4))
+                consecutive += 1
+                if consecutive >= MAX_CONSECUTIVE_READ_FAILURES:
+                    stopped_early = True
+                    break
+                continue
+            consecutive = 0
             layout, score, metrics = classify(frame, settings)
             observations.append(Observation(round(t, 4), layout, score, metrics))
-            index += 1
+            last_ok = t
     finally:
         cap.release()
-    return observations
+    covered_to = 0.0 if last_ok is None else min(duration, last_ok + step / 2)
+    tail = round(max(0.0, duration - covered_to), 3)
+    stats = {"expected": expected, "read": len(observations), "failed_times": failed,
+             "stopped_early": stopped_early, "unread_tail_seconds": tail,
+             "incomplete": tail > max(INCOMPLETE_TAIL_SECONDS, step)}
+    return observations, stats
 
+
+def sample_video(path: Path, duration: float, settings: Settings) -> list[Observation]:
+    return sample_video_with_stats(path, duration, settings)[0]
+
+
+def _sampling_warnings(stats: dict, duration: float) -> list[str]:
+    warnings = []
+    failed = stats["failed_times"]
+    if failed:
+        shown = ", ".join(f"{t:.2f}s" for t in failed[:10]) + (" ..." if len(failed) > 10 else "")
+        warnings.append(f"{len(failed)} sample(s) could not be decoded and were skipped (t = {shown}).")
+    if stats["incomplete"]:
+        warnings.append(f"Analysis incomplete: the last {stats['unread_tail_seconds']:.1f}s of {duration:.1f}s "
+                        "were not analysed (frames unreadable); results cover only the earlier part.")
+    return warnings
 
 def verify_ollama(frame: np.ndarray, model: str) -> tuple[bool, str]:
     """Experimental, opt-in semantic verification using only loopback Ollama endpoint."""
@@ -221,10 +256,13 @@ def verify_ollama(frame: np.ndarray, model: str) -> tuple[bool, str]:
     try:
         with urllib.request.urlopen(request, timeout=180) as resp:
             result = json.load(resp)
-    except (urllib.error.URLError, TimeoutError) as exc:
-        raise RuntimeError(f"Local Ollama unavailable ({model}): {exc}") from exc
-    content = json.loads(result["message"]["content"])
-    if type(content.get("match")) is not bool:
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Local Ollama unavailable or returned invalid data ({model}): {exc}") from exc
+    try:
+        content = json.loads(result["message"]["content"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"Ollama returned an unparseable response ({model}): {exc}") from exc
+    if not isinstance(content, dict) or type(content.get("match")) is not bool:
         raise RuntimeError(f"Ollama did not return boolean match: {content}")
     return content["match"], str(content.get("reason", ""))
 
@@ -248,53 +286,82 @@ def export_clip(source: Path, out: Path, start: float, end: float) -> None:
         raise RuntimeError(f"Empty exported clip: {out}")
 
 
+def _save_evidence(entry: dict, target: Path, source: Path, idx: int, frame: np.ndarray | None,
+                   enabled: bool, suffix: str = "") -> None:
+    if not enabled or frame is None:
+        return
+    evidence = target / "evidence" / f"{source.stem}_{idx:04d}{suffix}.jpg"
+    try:
+        evidence.parent.mkdir(parents=True, exist_ok=True)
+        if not cv2.imwrite(str(evidence), frame):
+            raise RuntimeError(f"Could not write evidence: {evidence}")
+        entry["evidence"] = str(evidence)
+    except (OSError, RuntimeError) as exc:
+        entry["evidence_error"] = str(exc)
+
+
 def process_file(source: Path, target: Path, settings: Settings) -> dict:
+    """Per-clip failures are recorded in report.json, not raised."""
     info = probe(source)
-    observations = sample_video(source, info["duration"], settings)
+    observations, sampling = sample_video_with_stats(source, info["duration"], settings)
+    warnings = _sampling_warnings(sampling, info["duration"])
     candidates = time_intervals(observations, info["duration"], settings)
     cap = cv2.VideoCapture(str(source))
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open for verification: {source}")
-    clips = []
+    clips: list[dict] = []
+    verify_errors = 0
+    verify_aborted = False
     try:
         for idx, (start, end) in enumerate(candidates, 1):
             entry: dict = {"start": start, "end": end, "duration": round(end-start, 3), "status": "candidate"}
+            clips.append(entry)
+            if verify_aborted:
+                entry["status"] = "verification_skipped"
+                continue
             frame = None
             if settings.ollama_model or settings.evidence:
                 frame = read_frame(cap, (start + end) / 2)
                 if frame is None:
                     entry["status"] = "frame_error"
-                    clips.append(entry)
                     continue
             if settings.ollama_model:
-                match, reason = verify_ollama(frame, settings.ollama_model)
+                try:
+                    match, reason = verify_ollama(frame, settings.ollama_model)
+                except RuntimeError as exc:
+                    entry.update(status="verification_error", error=str(exc))
+                    verify_errors += 1
+                    verify_aborted = verify_errors >= MAX_CONSECUTIVE_VERIFY_ERRORS
+                    _save_evidence(entry, target, source, idx, frame, settings.evidence, "_unverified")
+                    continue
+                verify_errors = 0
                 entry["verification"] = {"match": match, "reason": reason, "model": settings.ollama_model}
                 if not match:
                     entry["status"] = "rejected_semantic"
-                    clips.append(entry)
+                    _save_evidence(entry, target, source, idx, frame, settings.evidence, "_rejected")
                     continue
-            entry["status"] = "dry_run" if settings.dry_run else "exported"
+            _save_evidence(entry, target, source, idx, frame, settings.evidence)
+            if settings.dry_run:
+                entry["status"] = "dry_run"
+                continue
             out = target / "clips" / f"{source.stem}_{idx:04d}_{start:.3f}-{end:.3f}.mp4"
-            if not settings.dry_run:
+            try:
                 export_clip(source, out, start, end)
-                entry["output"] = str(out)
-            if settings.evidence and frame is not None:
-                evidence = target / "evidence" / f"{source.stem}_{idx:04d}.jpg"
-                evidence.parent.mkdir(parents=True, exist_ok=True)
-                if not cv2.imwrite(str(evidence), frame):
-                    raise RuntimeError(f"Could not write evidence: {evidence}")
-                entry["evidence"] = str(evidence)
-            clips.append(entry)
+            except RuntimeError as exc:
+                entry.update(status="export_error", error=str(exc))
+                continue
+            entry["status"] = "exported"
+            entry["output"] = str(out)
     finally:
         cap.release()
     report = {"input": str(source.resolve()), "video": info, "settings": asdict(settings),
+              "sampling": sampling, "warnings": warnings,
               "samples": [asdict(o) for o in observations], "clips": clips,
               "note": "Geometry-only detection identifies candidates, not confirmed semantic matches. "
                       "Optional local VLM checks a single midpoint frame, not the whole clip."}
     target.mkdir(parents=True, exist_ok=True)
     (target / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return report
-
 
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Extract simultaneous model/reference and generated-video comparisons (macOS-friendly)")
@@ -331,9 +398,18 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("Choose a dedicated output directory, not the input's parent")
         report = process_file(source, target, settings)
         n = sum(c["status"] in {"exported", "dry_run"} for c in report["clips"])
+        errors = [(i, c) for i, c in enumerate(report["clips"], 1) if c["status"] in ERROR_STATUSES]
+        for w in report["warnings"]:
+            print(f"warning: {w}", file=sys.stderr)
+        for i, c in errors:
+            print(f"error: clip {i} ({c['start']:.3f}-{c['end']:.3f}s) {c['status']}: {c.get('error', '')}", file=sys.stderr)
+        incomplete = report["sampling"]["incomplete"]
         print(json.dumps({"input": str(source), "output": str(target), "candidates": len(report["clips"]),
-                          "accepted": n, "report": str(target / "report.json")}, ensure_ascii=False))
-        return 0
+                          "accepted": n, "errors": len(errors), "warnings": len(report["warnings"]),
+                          "incomplete": incomplete, "report": str(target / "report.json")}, ensure_ascii=False))
+        if errors:
+            return 1
+        return 2 if incomplete else 0
     except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
