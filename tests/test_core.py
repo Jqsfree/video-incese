@@ -50,3 +50,19 @@ def test_merge_and_min_length():
 def test_bad_cli_arguments(tmp_path):
     assert main(["--input", str(tmp_path / "nonexistent.mp4"), "--output", str(tmp_path / "out")]) == 1
     assert main(["--input", str(__file__), "--output", str(tmp_path), "--sample-fps", "0"]) == 1
+
+
+def test_do_not_merge_true_absence_even_with_large_gap():
+    settings = Settings(sample_fps=2, min_duration=.8, merge_gap=2.6)
+    rows = [Observation(t, "pip" if t in {.25, .75, 2.75, 3.25} else "none", 2, {})
+            for t in [.25, .75, 1.25, 1.75, 2.25, 2.75, 3.25]]
+    assert time_intervals(rows, 3.5, settings) == [(0, 1), (2.5, 3.5)]
+
+
+def test_weak_pip_evidence_can_bridge():
+    settings = Settings(sample_fps=2, min_duration=.8, merge_gap=2.6)
+    weak = {"vertical_ratio": 2, "horizontal_ratio": 1.1,
+            "pip_vertical": 3, "pip_horizontal": 3}
+    rows = [Observation(t, "pip" if t in {.25, .75, 2.75, 3.25} else "none", 2, weak)
+            for t in [.25, .75, 1.25, 1.75, 2.25, 2.75, 3.25]]
+    assert time_intervals(rows, 3.5, settings) == [(0, 3.5)]
