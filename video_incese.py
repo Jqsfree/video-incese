@@ -109,19 +109,42 @@ def classify(frame: np.ndarray, settings: Settings) -> tuple[str, float, dict[st
     return "none", round(float(max(pip_score, split_score)), 3), metrics
 
 
+def _weak_comparison(o: Observation) -> bool:
+    """Low-confidence seam evidence to bridge brief low-contrast PiP intervals.
+
+    A blank or unrelated frame is not allowed to bridge merely because the
+    configured maximum time gap has not elapsed.
+    """
+    m = o.metrics
+    return (m.get("vertical_ratio", 0) >= 1.4
+            and m.get("horizontal_ratio", 0) >= .85
+            and m.get("pip_vertical", 0) >= 2
+            and m.get("pip_horizontal", 0) >= 2)
+
+
 def time_intervals(observations: list[Observation], duration: float, settings: Settings) -> list[tuple[float, float]]:
-    """Group positive sample cells; bridge short gaps only when bounded by positives."""
+    """Group positive sample cells, bridging longer gaps only with weak evidence."""
     dt = 1 / settings.sample_fps
     spans: list[list[float]] = []
-    for o in observations:
+    previous_positive_idx = None
+    for i, o in enumerate(observations):
         if not o.accepted:
             continue
         begin = max(0.0, o.t - dt / 2)
         finish = min(duration, o.t + dt / 2)
-        if spans and begin - spans[-1][1] <= settings.merge_gap + 1e-8:
+        if spans:
+            gap = begin - spans[-1][1]
+            interior = observations[previous_positive_idx + 1:i]
+            bridge = (gap <= min(settings.merge_gap, dt + 1e-8)
+                      or (gap <= settings.merge_gap and len(interior) > 0
+                          and all(_weak_comparison(x) for x in interior)))
+        else:
+            bridge = False
+        if bridge:
             spans[-1][1] = max(spans[-1][1], finish)
         else:
             spans.append([begin, finish])
+        previous_positive_idx = i
     if spans and observations and observations[-1].accepted and duration - (observations[-1].t + dt / 2) <= dt / 2 + 1e-8:
         spans[-1][1] = duration
     return [(round(a, 3), round(b, 3)) for a, b in spans if b-a >= settings.min_duration - 1e-8]
