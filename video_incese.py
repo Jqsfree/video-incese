@@ -16,6 +16,7 @@ import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from functools import partial
 
 from video_content import semantic_intervals
 
@@ -48,6 +49,9 @@ class Settings:
     boundary_tolerance: float = 0.125
     motion_delta: float = 0.3
     motion_min: float = 0.02
+    ollama_timeout: float = 300.0
+    ollama_num_predict: int = 192
+    ollama_think: bool = False
 
 
 @dataclass(frozen=True)
@@ -261,7 +265,7 @@ def verify_ollama(frame: np.ndarray, model: str) -> tuple[bool, str]:
                                        "images": [base64.b64encode(jpg.tobytes()).decode("ascii")]}]}).encode("utf-8"),
         headers={"Content-Type": "application/json"}, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=180) as resp:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
             result = json.load(resp)
     except (OSError, ValueError) as exc:
         raise RuntimeError(f"Local Ollama unavailable or returned invalid data ({model}): {exc}") from exc
@@ -274,7 +278,10 @@ def verify_ollama(frame: np.ndarray, model: str) -> tuple[bool, str]:
     return content["match"], str(content.get("reason", ""))
 
 
-def verify_ollama_frames(frames: list[np.ndarray], model: str) -> tuple[bool, str]:
+def verify_ollama_frames(
+    frames: list[np.ndarray], model: str, *,
+    timeout: float = 300.0, num_predict: int = 192, think: bool = False,
+) -> tuple[bool, str]:
     """Multi-frame reference/generated-content check. Fail closed on malformed VLM responses.
 
     The three images are chronological frames from the SAME video and window.
@@ -303,7 +310,9 @@ def verify_ollama_frames(frames: list[np.ndarray], model: str) -> tuple[bool, st
     request = urllib.request.Request(
         "http://127.0.0.1:11434/api/chat",
         data=json.dumps({"model": model, "stream": False, "format": "json",
-                         "options": {"temperature": 0},
+                         "think": think,
+                         "keep_alive": "20m",
+                         "options": {"temperature": 0, "num_predict": num_predict},
                          "messages": [{"role": "user", "content": prompt, "images": encoded}]}).encode("utf-8"),
         headers={"Content-Type": "application/json"}, method="POST")
     try:
@@ -373,8 +382,11 @@ def process_file(source: Path, target: Path, settings: Settings) -> dict:
                              "error": "Repeated semantic verification failures"})
             continue
         try:
+            verified = partial(verify_ollama_frames, timeout=settings.ollama_timeout,
+                               num_predict=settings.ollama_num_predict,
+                               think=settings.ollama_think)
             refined, trace = semantic_intervals(
-                source, start, end, settings, classify, verify_ollama_frames)
+                source, start, end, settings, classify, verified)
         except (RuntimeError, ValueError) as exc:
             prepared.append({"start": start, "end": end, "source_candidate": candidate_id,
                              "status": "verification_error", "error": str(exc)})
@@ -481,6 +493,12 @@ def parser() -> argparse.ArgumentParser:
                    help="Half-width in seconds of three-frame motion observation")
     p.add_argument("--motion-min", type=float, default=0.02,
                    help="Minimum changed pixel ratio in BOTH video regions")
+    p.add_argument("--ollama-timeout", type=float, default=300.0,
+                   help="Seconds to wait for one local vision request (default: 300)")
+    p.add_argument("--ollama-num-predict", type=int, default=192,
+                   help="Max generated tokens for JSON classification (default: 192)")
+    p.add_argument("--ollama-think", action="store_true",
+                   help="Enable thinking for supported models; slower, default disabled")
     p.add_argument("--evidence", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     return p
@@ -497,6 +515,8 @@ def main(argv: list[str] | None = None) -> int:
                 and .1 <= settings.motion_delta <= 1
                 and 0 <= settings.motion_min <= .5):
             raise ValueError("Invalid semantic step, boundary tolerance, motion delta or motion minimum")
+        if not (5 <= settings.ollama_timeout <= 3600 and 64 <= settings.ollama_num_predict <= 2048):
+            raise ValueError("Require 5 <= ollama-timeout <= 3600 and 64 <= ollama-num-predict <= 2048")
         if settings.content_mode == "semantic" and not settings.ollama_model:
             raise ValueError("Semantic mode requires --ollama-model (e.g. qwen3-vl:4b). "
                              "Use --content-mode layout only for geometry-only diagnostics.")
