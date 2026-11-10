@@ -25,7 +25,7 @@ import numpy as np
 class Settings:
     sample_fps: float = 2.0
     min_duration: float = 0.8
-    merge_gap: float = 1.5
+    merge_gap: float = 2.6
     layout: str = "auto"
     pip_x: float = 0.655
     pip_y: float = 0.338
@@ -72,8 +72,21 @@ def classify(frame: np.ndarray, settings: Settings) -> tuple[str, float, dict[st
     inset_std = float(g[5:y-3, x+4:w-5].std())
     main_std = float(g[y+5:h-12, 8:w-8].std())
     # Top inset must contain non-flat visual information; weak dark cartoon insets are valid.
+    # A true rectangular inset produces a strong, spatially localized seam.
+    # Ordinary scenery creates gradients of comparable strength on nearby lines.
+    vertical_bg = float(np.median([
+        np.abs(g[5:y-3, xx-2] - g[5:y-3, xx+2]).mean()
+        for xx in (x-14, x-10, x-6, x+6, x+10, x+14)
+    ]))
+    horizontal_bg = float(np.median([
+        np.abs(g[yy-2, x+3:w-5] - g[yy+2, x+3:w-5]).mean()
+        for yy in (y-14, y-10, y-6, y+6, y+10, y+14)
+    ]))
+    vertical_ratio = vertical / (vertical_bg + 1)
+    horizontal_ratio = horizontal / (horizontal_bg + 1)
     pip_score = min(vertical / max(settings.pip_vertical, .01), horizontal / max(settings.pip_horizontal, .01))
-    pip_ok = pip_score >= 1.0 and inset_std >= 6 and main_std >= 8
+    pip_ok = (pip_score >= 1.0 and vertical_ratio >= 2.0 and horizontal_ratio >= 1.5
+              and inset_std >= 6 and main_std >= 8)
 
     # Vertical seam between two full-height panels, not a short inset edge.
     xs = list(range(int(w * .47), int(w * .54), 2))
@@ -87,7 +100,8 @@ def classify(frame: np.ndarray, settings: Settings) -> tuple[str, float, dict[st
     metrics = {"pip_vertical": round(vertical, 2), "pip_horizontal": round(horizontal, 2),
                "inset_std": round(inset_std, 2), "main_std": round(main_std, 2),
                "split_edge": round(split_edge, 2), "left_std": round(left_std, 2),
-               "right_std": round(right_std, 2)}
+               "right_std": round(right_std, 2), "vertical_ratio": round(vertical_ratio, 2),
+               "horizontal_ratio": round(horizontal_ratio, 2)}
     if settings.layout in ("auto", "pip") and pip_ok:
         return "pip", round(float(pip_score), 3), metrics
     if settings.layout in ("auto", "split") and split_ok:
@@ -265,7 +279,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--output", required=True, type=Path, help="Output directory; source is untouched")
     p.add_argument("--sample-fps", type=float, default=2.0)
     p.add_argument("--min-duration", type=float, default=.8)
-    p.add_argument("--merge-gap", type=float, default=1.5)
+    p.add_argument("--merge-gap", type=float, default=2.6)
     p.add_argument("--layout", choices=("auto", "pip", "split"), default="auto")
     p.add_argument("--pip-x", type=float, default=.655, help="PiP top-left X, normalized [0,1]; default matches examples")
     p.add_argument("--pip-y", type=float, default=.338, help="PiP top-left Y, normalized [0,1]; default matches examples")
