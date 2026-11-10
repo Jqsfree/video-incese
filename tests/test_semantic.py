@@ -72,10 +72,10 @@ def test_mixed_sequence_finds_separate_spans_and_no_bridging(make_video, tmp_pat
     monkeypatch.setattr(content, "motion_pair", lambda *args: (.5, .5))
     def semantic(frames, model):
         # Marker encoded by test monkeypatch to _capture from its requested timestamp.
-        t = float(frames[1][0, 0, 0])
+        t = float(frames[1][0, 0, 0]) / 10.0
         return (2 <= t < 5 or 7 <= t < 9), "mock verdict"
     def capture(cap, t):
-        image = np.full((216, 384, 3), min(255, round(t)), dtype=np.uint8)
+        image = np.full((216, 384, 3), min(255, round(t * 10)), dtype=np.uint8)
         image[:73, 251:] = (20, 100, 220)
         return image
     monkeypatch.setattr(content, "_capture", capture)

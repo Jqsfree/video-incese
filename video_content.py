@@ -148,8 +148,19 @@ def semantic_intervals(
             j = i
             while j + 1 < len(coarse) and coarse[j+1].match:
                 j += 1
-            begin = start if i == 0 else edge(coarse[i-1], coarse[i])
-            finish = end if j == len(coarse) - 1 else edge(coarse[j], coarse[j+1])
+            if i == 0:
+                # Probe the uninspected start margin rather than assuming it matches.
+                start_probe = inspect(start + min(.1, (coarse[0].time-start)/2), "boundary")
+                begin = start if start_probe.match else edge(start_probe, coarse[0])
+            else:
+                begin = edge(coarse[i-1], coarse[i])
+            if j == len(coarse) - 1:
+                # Likewise verify near the trailing edge; otherwise the last
+                # half-scan-window may contain unrelated website/UI content.
+                end_probe = inspect(end - min(.1, (end-coarse[-1].time)/2), "boundary")
+                finish = end if end_probe.match else edge(coarse[-1], end_probe)
+            else:
+                finish = edge(coarse[j], coarse[j+1])
             if finish - begin >= settings.min_duration:
                 spans.append((round(begin, 3), round(finish, 3)))
             i = j+1
