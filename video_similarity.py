@@ -314,17 +314,28 @@ def scan_windows(source: Path, profile: dict, settings: object, *,
                    and profile.get("training_file_sha256") == _sha256(source))
     if exclude_reviewed and not same_source:
         raise ValueError("--exclude-reviewed requires the original training source")
-    reviewed = [(c["start"], c["end"]) for c in profile["cases"]] if exclude_reviewed else []
+    reviewed = sorted((c["start"], c["end"]) for c in profile["cases"]) if exclude_reviewed else []
+    # Scan the exact UNKNOWN complement, not coarse windows that touch a
+    # positive interval; this preserves short unknown gaps near boundaries.
+    scan_ranges = []
+    cursor = 0.0
+    for a, b in reviewed:
+        if a > cursor:
+            scan_ranges.append((cursor, a))
+        cursor = max(cursor, b)
+    if cursor < info["duration"]:
+        scan_ranges.append((cursor, info["duration"]))
+    if not reviewed:
+        scan_ranges = [(0.0, info["duration"])]
     cap = cv2.VideoCapture(str(source))
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video for similarity scan: {source}")
     windows = []
     failures = []
     try:
-        for start, end in _windows(0., info["duration"], step):
-            # Exclude any overlapping human-reviewed positive windows from same-source rediscovery.
-            if any(max(0., min(end, b) - max(start, a)) > 0 for a, b in reviewed):
-                continue
+        windows_to_scan = [interval for a, b in scan_ranges
+                           for interval in _windows(a, b, step)]
+        for start, end in windows_to_scan:
             try:
                 frames = _read_window(cap, start, end, fps)
                 geometry = _geometry(frames, settings)
