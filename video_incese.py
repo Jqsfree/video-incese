@@ -390,6 +390,9 @@ def process_file(source: Path, target: Path, settings: Settings) -> dict:
         model = load_model(settings.learned_model)
         refined_spans, temporal_windows, temporal_stats = scan_temporal(
             source, candidates, settings, classify, model)
+        if temporal_stats.get("failed_windows"):
+            warnings.append(f"{len(temporal_stats['failed_windows'])} temporal windows could not "
+                            "be decoded or evaluated; see temporal.failed_windows")
         by_candidate: dict[int, list[tuple[float, float]]] = {}
         for a, b, candidate_id in refined_spans:
             by_candidate.setdefault(candidate_id, []).append((a, b))
@@ -606,7 +609,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"warning: {w}", file=sys.stderr)
         for i, c in errors:
             print(f"error: clip {i} ({c['start']:.3f}-{c['end']:.3f}s) {c['status']}: {c.get('error', '')}", file=sys.stderr)
-        incomplete = report["sampling"]["incomplete"]
+        incomplete = report["sampling"]["incomplete"] or bool(report.get("temporal", {}).get("failed_windows"))
         print(json.dumps({"input": str(source), "output": str(target), "candidates": len(report["clips"]),
                           "accepted": n, "errors": len(errors), "warnings": len(report["warnings"]),
                           "incomplete": incomplete, "report": str(target / "report.json")}, ensure_ascii=False))
