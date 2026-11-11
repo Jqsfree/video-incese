@@ -61,6 +61,7 @@ class Settings:
     motion_min: float = 0.02
     temporal_step: float = 1.0
     temporal_fps: float = 4.0
+    temporal_context_gap: float = 2.0
     learned_model: Path | None = None
     learned_threshold: float = 0.60
     ollama_timeout: float = 300.0
@@ -503,8 +504,10 @@ def process_file(source: Path, target: Path, settings: Settings) -> dict:
               "samples": [asdict(o) for o in observations], "clips": clips,
               "source_candidates": len(candidates), "verification_trace": verification_trace,
               "temporal": temporal_stats, "temporal_windows": temporal_windows,
-              "note": ("Temporal-CV mode uses CPU-only two-region motion and optical flow; "
-                       "white-model/render correspondence is NOT semantically verified."
+              "note": ("Temporal-CV uses CPU-only two-region motion and optical flow, "
+                       "plus bounded context recovery of uncertain gaps. "
+                       "Context-rescued windows are NOT proof of semantic white-model/render correspondence; "
+                       "review them for accidental false-positive bridging."
                        if settings.content_mode == "temporal-cv" else
                        "Semantic mode uses sampled images and VLM decisions."
                        if settings.content_mode == "semantic" else
@@ -534,6 +537,9 @@ def parser() -> argparse.ArgumentParser:
                    help="Length of each CPU temporal window, seconds (default 1)")
     p.add_argument("--temporal-fps", type=float, default=4.0,
                    help="CPU sample frames per second within each temporal window")
+    p.add_argument("--temporal-context-gap", type=float, default=2.0,
+                   help="Max seconds of uncertain dual-video gap bridged with adjacent evidence; "
+                        "0 disables context recovery (default: 2)")
     p.add_argument("--learned-model", type=Path, default=None,
                    help="Optional JSON model trained from human review labels")
     p.add_argument("--learned-threshold", type=float, default=.60,
@@ -572,9 +578,10 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("Require 5 <= ollama-timeout <= 3600 and 64 <= ollama-num-predict <= 2048")
         if not (.25 <= settings.temporal_step <= 5.0
                 and 2 <= settings.temporal_fps <= 16
+                and 0 <= settings.temporal_context_gap <= 3
                 and 0.5 <= settings.learned_threshold <= 0.95):
             raise ValueError("Require .25 <= temporal-step <= 5, 2 <= temporal-fps <= 16, "
-                             "and .5 <= learned-threshold <= .95")
+                             "0 <= temporal-context-gap <= 3, and .5 <= learned-threshold <= .95")
         if settings.learned_model and settings.content_mode != "temporal-cv":
             raise ValueError("--learned-model requires --content-mode temporal-cv")
         if settings.content_mode == "temporal-cv" and settings.ollama_model:

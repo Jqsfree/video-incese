@@ -109,12 +109,26 @@ def rule_score(features: dict[str, float]) -> tuple[float, bool]:
     return round(score, 4), bool(keep)
 
 
-def _frame(cap: cv2.VideoCapture, t: float) -> np.ndarray:
+def _frame(cap: cv2.VideoCapture, t: float, *, near_file_end: bool = False) -> tuple[np.ndarray, bool]:
+    """Read exact sample, retry only at the true container tail.
+
+    MP4 format.duration can be slightly longer than the timestamp of the last
+    decodable frame. Never hide a decode error in the middle of the video.
+    """
     cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t) * 1000)
     ok, frame = cap.read()
-    if not ok or frame is None:
-        raise RuntimeError(f"Undecodable temporal sample at {t:.3f}s")
-    return frame
+    if ok and frame is not None:
+        return frame, False
+    if near_file_end:
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if math.isfinite(fps) and 1 <= fps <= 240:
+            for frames_back in (1, 2, 4, 6):
+                retry_t = max(0.0, t - frames_back / fps)
+                cap.set(cv2.CAP_PROP_POS_MSEC, retry_t * 1000)
+                ok, frame = cap.read()
+                if ok and frame is not None:
+                    return frame, True
+    raise RuntimeError(f"Undecodable temporal sample at {t:.3f}s")
 
 
 def _spans(windows: list[dict], min_duration: float) -> list[tuple[float, float]]:
@@ -132,6 +146,87 @@ def _spans(windows: list[dict], min_duration: float) -> list[tuple[float, float]
             if b - a >= min_duration - 1e-8]
 
 
+def _context_supported(row: dict, previous: dict | None, following: dict | None,
+                       model: dict | None, threshold: float) -> bool:
+    """Conservative evidence for short uncertain windows, never hard negatives."""
+    if row["reason"] not in {"insufficient_temporal_evidence", "no_comparison_layout"}:
+        return False
+    if row["reason"] == "no_comparison_layout":
+        choices = row.get("_alternative_features", {})
+        if not choices:
+            return False
+        nearby = {v["layout"] for v in (previous, following)
+                  if v is not None and v["layout"] in {"pip", "split"}}
+        candidates = []
+        for mode in nearby:
+            if mode in choices:
+                f = choices[mode]
+                score, _ = rule_score(f)
+                candidates.append((score, mode, f))
+        if not candidates:
+            return False
+        _, inferred, features = max(candidates, key=lambda v: v[0])
+    else:
+        inferred = row["layout"]
+        features = row["features"]
+    if not (features["rendered_motion"] >= .012
+            and features["reference_edges"] >= .015
+            and features["rendered_edges"] >= .012
+            and features["scene_cut_fraction"] <= .25):
+        return False
+    if model is not None:
+        from video_active import predict_proba
+        probability = predict_proba(model, features)
+        if probability < threshold:
+            return False
+        row["learned_probability"] = round(probability, 4)
+    row["layout"] = inferred
+    row["features"] = features
+    row["accepted"] = True
+    row["reason"] = "context_layout_recovered" if row["raw_reason"] == "no_comparison_layout" else "context_motion_pause"
+    row["decision_source"] = "short_gap_context"
+    return True
+
+
+def _restore_context(windows: list[dict], max_gap: float, model: dict | None,
+                     threshold: float) -> None:
+    """Rescue only weak/uncertain windows with nearby strong valid evidence.
+
+    A zero-motion reference inside a known comparison can be a brief animation
+    pause, but there is no reliable way to identify long static screenshots
+    from optical flow alone. Hard errors, scene cuts and learned rejections are
+    never bridged. Every rescued window is tagged for manual review.
+    """
+    if max_gap <= 0:
+        return
+    i = 0
+    while i < len(windows):
+        if windows[i]["accepted"]:
+            i += 1
+            continue
+        j = i
+        while j < len(windows) and not windows[j]["accepted"]:
+            j += 1
+        group = windows[i:j]
+        seconds = sum(w["end"] - w["start"] for w in group)
+        left = windows[i - 1] if i > 0 else None
+        right = windows[j] if j < len(windows) else None
+        interior = left is not None and right is not None and seconds <= max_gap + 1e-6
+        terminal = (left is not None and right is None and j == len(windows)
+                    and i >= 2 and windows[i - 2]["accepted"]
+                    and seconds <= min(max_gap, 1.5) + 1e-6)
+        if interior or terminal:
+            if all(w["reason"] in {"insufficient_temporal_evidence", "no_comparison_layout"}
+                   for w in group):
+                # Precheck every window: either ALL are rescued or NONE,
+                # avoiding partial bridges that would hide uncertainty.
+                tentative = [dict(w) for w in group]
+                if all(_context_supported(w, left, right, model, threshold) for w in tentative):
+                    for original, replacement in zip(group, tentative):
+                        original.update(replacement)
+        i = j
+
+
 def scan_temporal(path: Path, candidates: list[tuple[float, float]], settings: object,
                   classify: object, model: dict | None = None) -> tuple[list[tuple[float, float, int]], list[dict], dict]:
     """Scan candidate times, returning accepted windows, all evidence, and timing."""
@@ -143,6 +238,10 @@ def scan_temporal(path: Path, candidates: list[tuple[float, float]], settings: o
     windows: list[dict] = []
     failed = []
     interval = float(settings.temporal_step)
+    recovered_tail_samples: list[float] = []
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    nframes = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    approximate_last_frame = ((nframes - 1) / fps if fps > 0 and nframes > 0 else None)
     try:
         for candidate_id, (start, end) in enumerate(candidates, 1):
             count = math.ceil((end - start) / interval)
@@ -155,29 +254,58 @@ def scan_temporal(path: Path, candidates: list[tuple[float, float]], settings: o
                 times = np.linspace(a + min(.03, (b-a)/8), b - min(.03, (b-a)/8),
                                     max(3, int(math.ceil((b-a)*settings.temporal_fps))+1))
                 try:
-                    frames = [_frame(cap, float(t)) for t in times]
+                    reads = [
+                        _frame(cap, float(t), near_file_end=(
+                            approximate_last_frame is not None and
+                            float(t) >= approximate_last_frame - .05 and
+                            float(t) <= approximate_last_frame + .45))
+                        for t in times
+                    ]
+                    frames = [frame for frame, _ in reads]
+                    recovered_tail_samples.extend(
+                        round(float(t), 3) for t, (_, recovered) in zip(times, reads) if recovered
+                    )
                     label, strength, _ = classify(frames[len(frames)//2], settings)
+                    alternates = {}
                     if label == "none":
                         feats = {k: 0.0 for k in FEATURE_NAMES}
                         score, gate = 0.0, False
                         reason = "no_comparison_layout"
+                        # Geometry alone is not proof of absence; retain
+                        # alternative region evidence for nearby anchors.
+                        alternates = {mode: calculate_features(frames, mode, settings)
+                                      for mode in ("pip", "split")}
                     else:
                         feats = calculate_features(frames, label, settings, strength)
                         score, gate = rule_score(feats)
                         reason = "dual_motion" if gate else "insufficient_temporal_evidence"
                     prediction = None
-                    if model is not None:
+                    if model is not None and label != "none":
                         from video_active import predict_proba
                         prediction = predict_proba(model, feats)
-                        gate = gate and prediction >= settings.learned_threshold
-                        if not gate and prediction is not None:
-                            reason = "temporal_or_learned_filter"
+                        if prediction < settings.learned_threshold:
+                            gate = False
+                            reason = "rejected_learned"
+                        elif not gate:
+                            # Learned feedback may RESTORE a weak-motion
+                            # window, unlike v0.3.1's veto-only rule.
+                            plausible = (feats["rendered_motion"] >= .012
+                                         and feats["reference_edges"] >= .015
+                                         and feats["reference_flow"] >= .02
+                                         and feats["scene_cut_fraction"] <= .25)
+                            if plausible:
+                                gate = True
+                                reason = "accepted_learned"
                     row = {
                         "window_id": len(windows) + 1, "source_candidate": candidate_id,
                         "start": a, "end": b, "layout": label,
                         "features": feats, "heuristic_score": score,
                         "learned_probability": (round(prediction, 4) if prediction is not None else None),
                         "accepted": bool(gate), "reason": reason,
+                        "raw_accepted": bool(gate), "raw_reason": reason,
+                        "decision_source": ("learned" if reason in {"accepted_learned", "rejected_learned"}
+                                            else "temporal_rules"),
+                        "_alternative_features": alternates,
                     }
                 except (RuntimeError, cv2.error, ValueError) as exc:
                     failed.append({"start": a, "end": b, "error": str(exc)})
@@ -187,9 +315,15 @@ def scan_temporal(path: Path, candidates: list[tuple[float, float]], settings: o
                         "features": {k: 0.0 for k in FEATURE_NAMES},
                         "heuristic_score": 0.0, "learned_probability": None,
                         "accepted": False, "reason": "frame_error",
+                        "raw_accepted": False, "raw_reason": "frame_error",
+                        "decision_source": "decoder_error", "_alternative_features": {},
                     }
                 windows.append(row)
                 own.append(row)
+            _restore_context(own, float(settings.temporal_context_gap), model,
+                             float(settings.learned_threshold))
+            for row in own:
+                row.pop("_alternative_features", None)
             for a, b in _spans(own, settings.min_duration):
                 accepted.append((a, b, candidate_id))
     finally:
@@ -197,5 +331,9 @@ def scan_temporal(path: Path, candidates: list[tuple[float, float]], settings: o
     stats = {"mode": FEATURE_VERSION, "windows": len(windows),
              "accepted_windows": sum(bool(w["accepted"]) for w in windows),
              "elapsed_seconds": round(time.perf_counter() - started, 3),
-             "failed_windows": failed, "boundary_uncertainty_seconds": interval}
+             "failed_windows": failed,
+             "recovered_tail_samples": recovered_tail_samples,
+             "context_recovered_windows": sum(w["decision_source"] == "short_gap_context" for w in windows),
+             "learned_recovered_windows": sum(w["reason"] == "accepted_learned" for w in windows),
+             "boundary_uncertainty_seconds": interval}
     return accepted, windows, stats
