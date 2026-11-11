@@ -202,3 +202,117 @@ def test_real_animated_pip_video_keeps_motion_and_drops_static_reference(tmp_pat
     assert len(list((out/"clips").glob("*.mp4"))) == len(exported)
     assert any(w["reason"] == "insufficient_temporal_evidence"
                for w in data["temporal_windows"]), "Static reference interval not rejected"
+
+
+def _window(start, *, accepted=False, reason="insufficient_temporal_evidence",
+            reference_motion=0.0, rendered_motion=.05, reference_edges=.08,
+            rendered_edges=.08, layout="pip"):
+    f = {k: 0.0 for k in cvmode.FEATURE_NAMES}
+    f.update(reference_motion=reference_motion, rendered_motion=rendered_motion,
+             reference_flow=.2 if reference_motion else 0.0,
+             reference_edges=reference_edges, rendered_edges=rendered_edges)
+    return {
+        "start": float(start), "end": float(start+1), "accepted": accepted,
+        "raw_accepted": accepted, "reason": reason, "raw_reason": reason,
+        "layout": layout, "features": f, "learned_probability": None,
+        "decision_source": "temporal_rules", "_alternative_features": {},
+    }
+
+
+def test_context_rescues_static_reference_inside_known_comparison():
+    windows = [
+        _window(0, accepted=True, reason="dual_motion", reference_motion=.3),
+        _window(1, accepted=False),
+        _window(2, accepted=False),
+        _window(3, accepted=True, reason="dual_motion", reference_motion=.3),
+    ]
+    cvmode._restore_context(windows, 2, None, .60)
+    assert all(w["accepted"] for w in windows)
+    assert [w["reason"] for w in windows[1:3]] == ["context_motion_pause"]*2
+    assert cvmode._spans(windows, .8) == [(0, 4)]
+
+
+def test_context_rescues_weak_layout_only_when_alternatives_have_visual_evidence():
+    original = _window(1, reason="no_comparison_layout", layout="none")
+    alternative = dict(original["features"])
+    alternative.update(reference_motion=.09, rendered_motion=.15,
+                       reference_flow=.4, rendered_flow=.5, dual_motion_fraction=1.0)
+    original["_alternative_features"] = {"pip": alternative}
+    windows = [
+        _window(0, accepted=True, reason="dual_motion", reference_motion=.3),
+        original,
+        _window(2, accepted=True, reason="dual_motion", reference_motion=.3),
+    ]
+    cvmode._restore_context(windows, 2, None, .60)
+    assert original["accepted"] and original["layout"] == "pip"
+    assert original["reason"] == "context_layout_recovered"
+    assert original["raw_reason"] == "no_comparison_layout"
+
+
+def test_context_does_not_bridge_unverified_or_long_gaps():
+    hard = _window(1, reason="frame_error", layout="none")
+    windows = [
+        _window(0, accepted=True, reason="dual_motion"),
+        hard,
+        _window(2, accepted=True, reason="dual_motion"),
+    ]
+    cvmode._restore_context(windows, 2, None, .60)
+    assert not hard["accepted"]
+    assert cvmode._spans(windows, .8) == [(0, 1), (2, 3)]
+    many = [
+        _window(0, accepted=True, reason="dual_motion"),
+        _window(1), _window(2), _window(3),
+        _window(4, accepted=True, reason="dual_motion"),
+    ]
+    cvmode._restore_context(many, 2, None, .60)
+    assert not any(w["accepted"] for w in many[1:4])
+
+
+def test_terminal_pause_limited_and_recoverable():
+    windows = [
+        _window(0, accepted=True, reason="dual_motion"),
+        _window(1, accepted=True, reason="dual_motion"),
+        _window(2),
+    ]
+    cvmode._restore_context(windows, 2, None, .60)
+    assert windows[-1]["accepted"]
+    assert windows[-1]["reason"] == "context_motion_pause"
+    assert cvmode._spans(windows, .8) == [(0, 3)]
+    too_long = [
+        _window(0, accepted=True, reason="dual_motion"),
+        _window(1, accepted=True, reason="dual_motion"),
+        _window(2), _window(3),
+    ]
+    cvmode._restore_context(too_long, 2, None, .60)
+    assert not too_long[-1]["accepted"]
+
+
+def test_context_can_be_disabled():
+    windows = [
+        _window(0, accepted=True, reason="dual_motion"),
+        _window(1),
+        _window(2, accepted=True, reason="dual_motion"),
+    ]
+    cvmode._restore_context(windows, 0, None, .60)
+    assert not windows[1]["accepted"]
+
+
+def test_last_timestamp_retry_is_not_general_error_mask():
+    class FakeCapture:
+        def __init__(self):
+            self.position = 0
+        def set(self, attr, value):
+            assert attr == cv2.CAP_PROP_POS_MSEC
+            self.position = value/1000
+        def get(self, attr):
+            assert attr == cv2.CAP_PROP_FPS
+            return 30
+        def read(self):
+            if self.position <= 20.34:
+                return True, np.zeros((8, 8, 3), dtype=np.uint8)
+            return False, None
+    cap = FakeCapture()
+    frame, recovered = cvmode._frame(cap, 20.357, near_file_end=True)
+    assert frame.shape == (8, 8, 3) and recovered
+    with pytest.raises(RuntimeError, match="20.357"):
+        cvmode._frame(cap, 20.357, near_file_end=False)
