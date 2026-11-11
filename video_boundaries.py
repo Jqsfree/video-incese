@@ -20,7 +20,7 @@ import numpy as np
 
 from video_content import _regions
 
-BOUNDARY_VERSION = "dual-region-scene-v1"
+BOUNDARY_VERSION = "dual-region-scene-v2"
 
 
 @dataclass(frozen=True)
@@ -130,7 +130,10 @@ def scan_boundaries(path: Path, spans: list[tuple[float, float, int]],
     """Return auditable events only. No detection labels or spans are mutated."""
     started = time.perf_counter()
     fps = float(settings.boundary_fps)
-    min_length = max(float(settings.min_duration), float(settings.boundary_min_separation))
+    # Separate minimum *final segment* length from non-max suppression distance.
+    # This avoids many 0.9-1.2s fragments without deleting accepted footage.
+    min_length = max(float(settings.min_duration), float(settings.boundary_min_separation),
+                     float(settings.boundary_min_segment))
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open scene boundary source: {path}")
@@ -210,6 +213,7 @@ def scan_boundaries(path: Path, spans: list[tuple[float, float, int]],
         "sample_fps": fps,
         "threshold": float(settings.boundary_threshold),
         "min_separation_seconds": float(settings.boundary_min_separation),
+        "min_segment_seconds": min_length,
         "pairs_evaluated": pairs,
         "proposed_events": proposals,
         "accepted_events": sum(e["status"] == "accepted" for e in events),

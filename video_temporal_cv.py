@@ -93,6 +93,35 @@ def calculate_features(frames: list[np.ndarray], layout: str, settings: object,
     return {name: round(metrics[name], 5) for name in FEATURE_NAMES}
 
 
+def motion_correspondence(frames: list[np.ndarray], layout: str, settings: object) -> dict:
+    """Uncalibrated *diagnostic* of synchronized motion magnitude.
+
+    A high value is not evidence that the white model and render show the same
+    action. Camera movement and simultaneous cuts can also correlate. Kept
+    outside FEATURE_NAMES so stored models retain the old feature contract.
+    """
+    if len(frames) < 5:
+        return {"correlation": None, "pairs": max(0, len(frames)-1),
+                "status": "insufficient_frames"}
+    refs, renders = zip(*[_regions(frame, layout, settings.pip_x, settings.pip_y)
+                          for frame in frames])
+    left = [_gray_region(region) for region in refs]
+    right = [_gray_region(region) for region in renders]
+    a = np.array([np.mean(cv2.absdiff(left[i], left[i+1]) > 12)
+                  for i in range(len(left)-1)], dtype=np.float64)
+    b = np.array([np.mean(cv2.absdiff(right[i], right[i+1]) > 12)
+                  for i in range(len(right)-1)], dtype=np.float64)
+    if np.std(a) < .005 or np.std(b) < .005:
+        return {"correlation": None, "pairs": len(a),
+                "status": "insufficient_motion_variation"}
+    correlation = float(np.corrcoef(a, b)[0, 1])
+    if not math.isfinite(correlation):
+        return {"correlation": None, "pairs": len(a),
+                "status": "undefined"}
+    return {"correlation": round(correlation, 4), "pairs": len(a),
+            "status": "uncalibrated_not_a_match_classifier"}
+
+
 def rule_score(features: dict[str, float]) -> tuple[float, bool]:
     """Conservative temporal gate. Content semantics cannot be deduced from it."""
     r, g = features["reference_motion"], features["rendered_motion"]
@@ -279,6 +308,9 @@ def scan_temporal(path: Path, candidates: list[tuple[float, float]], settings: o
                         feats = calculate_features(frames, label, settings, strength)
                         score, gate = rule_score(feats)
                         reason = "dual_motion" if gate else "insufficient_temporal_evidence"
+                    correlation = (motion_correspondence(frames, label, settings)
+                                   if getattr(settings, "motion_diagnostics", False)
+                                   and label != "none" else None)
                     prediction = None
                     if model is not None and label != "none":
                         from video_active import predict_proba
@@ -305,6 +337,7 @@ def scan_temporal(path: Path, candidates: list[tuple[float, float]], settings: o
                         "raw_accepted": bool(gate), "raw_reason": reason,
                         "decision_source": ("learned" if reason in {"accepted_learned", "rejected_learned"}
                                             else "temporal_rules"),
+                        "motion_correspondence": correlation,
                         "_alternative_features": alternates,
                     }
                 except (RuntimeError, cv2.error, ValueError) as exc:

@@ -65,8 +65,10 @@ class Settings:
     temporal_context_gap: float = 2.0
     boundary_mode: str = "scene"
     boundary_fps: float = 2.5
-    boundary_threshold: float = 0.42
+    boundary_threshold: float = 0.55
     boundary_min_separation: float = 0.85
+    boundary_min_segment: float = 2.0
+    motion_diagnostics: bool = False
     learned_model: Path | None = None
     learned_threshold: float = 0.60
     ollama_timeout: float = 300.0
@@ -567,10 +569,16 @@ def parser() -> argparse.ArgumentParser:
                         "off reproduces v0.3-style joining")
     p.add_argument("--boundary-fps", type=float, default=2.5,
                    help="Samples per second for independent scene-boundary scan")
-    p.add_argument("--boundary-threshold", type=float, default=.42,
+    p.add_argument("--boundary-threshold", type=float, default=.55,
                    help="Minimum BOTH-panel scene-change score, 0..1")
     p.add_argument("--boundary-min-separation", type=float, default=.85,
-                   help="Minimum time between scene cuts and accepted-span edges")
+                   help="Minimum separation between proposed scene cuts")
+    p.add_argument("--boundary-min-segment", type=float, default=2.0,
+                   help="Minimum duration of each final segment created by scene cuts, "
+                        "2s by default; 0.85 reproduces v0.4 policy")
+    p.add_argument("--motion-diagnostics", action="store_true",
+                   help="EXPERIMENTAL: attach weak motion-trace correlation evidence "
+                        "per temporal window; does NOT accept or reject content")
     p.add_argument("--learned-model", type=Path, default=None,
                    help="Optional JSON model trained from human review labels")
     p.add_argument("--learned-threshold", type=float, default=.60,
@@ -615,10 +623,12 @@ def main(argv: list[str] | None = None) -> int:
                              "0 <= temporal-context-gap <= 3, and .5 <= learned-threshold <= .95")
         if not (1 <= settings.boundary_fps <= 12
                 and 0.15 <= settings.boundary_threshold <= 0.95
-                and 0.25 <= settings.boundary_min_separation <= 10):
+                and 0.25 <= settings.boundary_min_separation <= 10
+                and 0.25 <= settings.boundary_min_segment <= 30):
             raise ValueError("Require 1 <= boundary-fps <= 12, "
                              ".15 <= boundary-threshold <= .95, "
-                             ".25 <= boundary-min-separation <= 10")
+                             ".25 <= boundary-min-separation <= 10, "
+                             ".25 <= boundary-min-segment <= 30")
         if settings.learned_model and settings.content_mode != "temporal-cv":
             raise ValueError("--learned-model requires --content-mode temporal-cv")
         if settings.content_mode == "temporal-cv" and settings.ollama_model:
