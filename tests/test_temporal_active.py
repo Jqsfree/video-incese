@@ -18,7 +18,7 @@ def _animated_frame(index: int, move_reference=True, move_rendered=True):
     rx = 278 + (index * 5 if move_reference else 0)
     gx = 37 + (index * 7 if move_rendered else 0)
     cv2.rectangle(frame, (rx, 19), (rx + 23, 53), (190, 220, 40), -1)
-    cv2.rectangle(frame, (gx, 100), (gx + 35, 157), (200, 40, 90), -1)
+    cv2.rectangle(frame, (gx, 100), (gx + 35, 157), (240, 240, 240), -1)
     return frame
 
 
