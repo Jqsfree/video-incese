@@ -19,9 +19,10 @@ video-incese-learn = "video_active:main"
 video-incese-eval = "video_evaluate:main"
 video-incese-rank = "video_similarity:main"
 video-incese-experiment = "video_experiments:main"
+video-incese-boundary-bench = "video_boundary_experiments:main"
 
 [tool.setuptools]
-py-modules = ["video_incese", "video_content", "video_temporal_cv", "video_active", "video_positive", "video_boundaries", "video_evaluate", "video_similarity", "video_experiments"]
+py-modules = ["video_incese", "video_content", "video_temporal_cv", "video_active", "video_positive", "video_boundaries", "video_evaluate", "video_similarity", "video_experiments", "video_boundary_experiments"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
