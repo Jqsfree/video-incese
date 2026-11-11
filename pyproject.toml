@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "video-incese"
-version = "0.2.1"
+version = "0.3.0"
 description = "Extract model/reference + generated-video comparison segments"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,7 +17,7 @@ dev = ["pytest>=8,<10"]
 video-incese = "video_incese:main"
 
 [tool.setuptools]
-py-modules = ["video_incese", "video_content"]
+py-modules = ["video_incese", "video_content", "video_motion"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
