@@ -277,39 +277,70 @@ def validate_profile(profile: dict) -> None:
                 _finite(example["features"][name], name)
 
 
-def _score_features(descriptor: dict[str, float], profile: dict, layout: str) -> tuple[float, list[dict]]:
-    """Case-balanced nearest positive similarity; ranking score is NOT P(keep)."""
+SIMILARITY_STRATEGIES = ("balanced", "nearest", "top3", "centroid", "motion")
+MOTION_ONLY = (
+    "reference_motion", "rendered_motion",
+    "reference_flow", "rendered_flow",
+    "reference_coherence", "rendered_coherence",
+    "dual_motion_fraction", "scene_cut_fraction",
+)
+
+
+def _score_features(descriptor: dict[str, float], profile: dict, layout: str,
+                    *, strategy: str = "balanced") -> tuple[float, list[dict]]:
+    """Positive-example retrieval score (NOT a calibrated P(keep)).
+
+    balanced: original v0.6 per-case nearest example, top-3-case blend.
+    nearest: single closest case and example.
+    top3: median-of-nearest three examples within each case, then blend.
+    centroid: case per-layout median descriptor, then blend.
+    motion: balanced matching using only temporal movement fields.
+    """
+    if strategy not in SIMILARITY_STRATEGIES:
+        raise ValueError(f"Unknown similarity strategy: {strategy}")
+    names = MOTION_ONLY if strategy == "motion" else FEATURES
     scores = []
-    scale = profile["scales"]
-    weights = profile["weights"]
-    weight_sum = sum(weights[n] for n in FEATURES)
+    scale, weights = profile["scales"], profile["weights"]
+    weight_sum = sum(weights[n] for n in names)
     for case in profile["cases"]:
         examples = [x for x in case["examples"] if x["layout"] == layout]
-        # Cross-layout matching is permitted only as uncalibrated fallback.
         cross_layout = not examples
         if cross_layout:
             examples = case["examples"]
-        nearest = float("inf")
-        for ex in examples:
-            distance = sum(weights[n] * min(3., abs(descriptor[n] - ex["features"][n]) / scale[n])
-                           for n in FEATURES) / weight_sum
-            nearest = min(nearest, distance)
-        sim = float(math.exp(-.55 * nearest))
+        if strategy == "centroid":
+            # Balanced per case regardless of how long that clip was.
+            example_vectors = [{name: float(np.median(
+                [ex["features"][name] for ex in examples])) for name in names}]
+        else:
+            example_vectors = [ex["features"] for ex in examples]
+        distances = sorted(
+            sum(weights[n] * min(3., abs(descriptor[n] - ex[n]) / scale[n])
+                for n in names) / weight_sum
+            for ex in example_vectors
+        )
+        distance = (sum(distances[:3]) / min(3, len(distances))
+                    if strategy == "top3" else distances[0])
+        sim = float(math.exp(-.55 * distance))
         if cross_layout:
-            sim *= .92  # Unknown layout mismatch is a hypothesis, not proof.
+            sim *= .92
         scores.append({"case_id": case["case_id"], "similarity": round(sim, 5),
                        "cross_layout": cross_layout})
     scores.sort(key=lambda x: (-x["similarity"], x["case_id"]))
     best = scores[:3]
-    score = .8 * best[0]["similarity"] + .2 * sum(x["similarity"] for x in best) / len(best)
+    score = (best[0]["similarity"] if strategy == "nearest"
+             else .8 * best[0]["similarity"]
+             + .2 * sum(x["similarity"] for x in best) / len(best))
     return round(score, 5), best
 
 
 def scan_windows(source: Path, profile: dict, settings: object, *,
                  step: float | None = None, fps: float | None = None,
-                 exclude_reviewed: bool = False) -> tuple[list[dict], dict]:
+                 exclude_reviewed: bool = False,
+                 strategy: str = "balanced") -> tuple[list[dict], dict]:
     from video_incese import probe
     validate_profile(profile)
+    if strategy not in SIMILARITY_STRATEGIES:
+        raise ValueError(f"Unknown similarity strategy: {strategy}")
     info = probe(source)
     step = float(step or profile["window_seconds"])
     fps = float(fps or profile["sample_fps"])
@@ -350,7 +381,8 @@ def scan_windows(source: Path, profile: dict, settings: object, *,
                 # or the wrong region; original layout gating is NOT repeated here.
                 for layout in ("pip", "split"):
                     features = _descriptor(frames, layout, settings)
-                    similarity, cases = _score_features(features, profile, layout)
+                    similarity, cases = _score_features(
+                        features, profile, layout, strategy=strategy)
                     _, passes_rule = rule_score({
                         **{name: features[name] for name in (
                             "reference_motion", "rendered_motion", "reference_flow",
@@ -379,6 +411,7 @@ def scan_windows(source: Path, profile: dict, settings: object, *,
         "same_source_as_training": same_source,
         "exclude_reviewed": exclude_reviewed,
         "score_is_probability": False,
+        "similarity_strategy": strategy,
     }
 
 
@@ -471,11 +504,12 @@ def run_scan(source: Path, profile: dict, output: Path, settings: object, *,
              step: float | None = None, fps: float | None = None,
              min_similarity: float = .62, min_duration: float = 2.0,
              boundary_mode: str = "scene", export_top: int = 0,
-             exclude_reviewed: bool = False) -> dict:
+             exclude_reviewed: bool = False,
+             strategy: str = "balanced") -> dict:
     if boundary_mode not in {"scene", "off"} or export_top < 0:
         raise ValueError("boundary mode must be scene/off; export_top cannot be negative")
     windows, scan = scan_windows(source, profile, settings, step=step, fps=fps,
-                                exclude_reviewed=exclude_reviewed)
+                                exclude_reviewed=exclude_reviewed, strategy=strategy)
     accepted = _contiguous(windows, min_similarity)
     events = []
     bounds = {"mode": "off", "accepted_events": 0}
@@ -509,7 +543,8 @@ def run_scan(source: Path, profile: dict, output: Path, settings: object, *,
                      "min_duration": min_duration,
                      "boundary_mode": boundary_mode,
                      "export_top": export_top,
-                     "exclude_reviewed": exclude_reviewed},
+                     "exclude_reviewed": exclude_reviewed,
+                     "similarity_strategy": strategy},
         "scan": scan, "boundaries": bounds, "boundary_events": events,
         "ranked": ranked, "windows": windows,
         "warning": ("RANK ONLY: similarity is not calibrated probability; "
@@ -592,6 +627,8 @@ def parser() -> argparse.ArgumentParser:
                       help="Export this many highest-ranked clips; 0=rank only")
     scan.add_argument("--exclude-reviewed", action="store_true",
                       help="Exclude annotated positive times when rescanning the EXACT training source")
+    scan.add_argument("--strategy", choices=SIMILARITY_STRATEGIES, default="balanced",
+                      help="Experimental ranking strategy; balanced reproduces v0.6")
 
     ev = sub.add_parser("evaluate", help="Positive-only recall and one-to-one case IoU at Top-K")
     ev.add_argument("--ranking", required=True, type=Path, help="ranking.json from scan")
@@ -637,7 +674,8 @@ def main(argv: list[str] | None = None) -> int:
                               min_duration=args.min_duration,
                               boundary_mode=args.boundary_mode,
                               export_top=args.export_top,
-                              exclude_reviewed=args.exclude_reviewed)
+                              exclude_reviewed=args.exclude_reviewed,
+                              strategy=args.strategy)
             print(json.dumps({"ranking": str(args.output / "ranking.csv"),
                               "windows_scored": result["scan"]["windows_scored"],
                               "none_layout_scored": result["scan"]["geometry_none_but_scored"],
