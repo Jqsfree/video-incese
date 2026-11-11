@@ -186,3 +186,37 @@ def test_rank_outputs_are_auditable_not_automatically_verified(make_video, tmp_p
     assert (out / "ranking.json").is_file()
     assert (out / "ranking.csv").is_file()
     assert not (out / "ranked-clips").exists()
+
+
+def test_top_k_evaluation_uses_positive_recall_not_unverified_precision(tmp_path):
+    truth = tmp_path / "human.json"
+    truth.write_text(json.dumps({
+        "source": "original.mp4",
+        "positives": [{"start": 10, "end": 14}, {"start": 20, "end": 24}]}))
+    ranking = {
+        "input": "/tmp/original.mp4",
+        "scan": {"duration": 30., "same_source_as_training": True},
+        "ranked": [
+            {"rank": 1, "start": 10, "end": 14},
+            {"rank": 2, "start": 0, "end": 4},  # UNKNOWN: not a confirmed negative
+            {"rank": 3, "start": 20, "end": 24},
+        ],
+    }
+    result = sim.evaluate_ranking(ranking, truth, top_k=(1, 2, 3))
+    assert [x["annotated_positive_time_recall"] for x in result["results"]] == [
+        .5, .5, 1.0]
+    assert [x["one_to_one_iou_matches"] for x in result["results"]] == [1, 1, 2]
+    assert all(x["precision_at_k"] is None for x in result["results"])
+    assert result["same_source_as_training"] is True
+
+
+def test_top_k_validation_guards_bad_reference(tmp_path):
+    truth = tmp_path / "human.json"
+    truth.write_text(json.dumps({
+        "source": "other.mp4",
+        "positives": [{"start": 1, "end": 2}]}))
+    with pytest.raises(ValueError, match="not"):
+        sim.evaluate_ranking({
+            "input": "original.mp4", "scan": {"duration": 10},
+            "ranked": [{"rank": 1, "start": 1, "end": 2}]},
+            truth, top_k=(1,))
