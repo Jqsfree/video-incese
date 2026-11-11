@@ -86,6 +86,24 @@ video-incese-experiment \
 
 输出的 `label_audit.possible_time_axis_conflicts` 会列出候选冲突，`source_identity_verified=false` 表示程序无法通过 review.csv 本身核实原视频 SHA256；应先确认是否为同一原始时间轴。
 
+## 场景边界的另一条独立实验
+
+对于已有的 v0.4 或 v0.5 report.json，以及人工原片2.json，可以离线比较切点阈值：
+
+```bash
+video-incese-boundary-bench \
+  --report "$HOME/Movies/video-incese-v040/report.json" \
+  --truth "$TRUTH" \
+  --output "$OUT/boundary-sweep.json" \
+  --thresholds 0.42 0.50 0.52 0.55 0.60
+```
+
+请把 `--report` 替换成你机器上实际存在的 v0.4.0 报告路径。**报告中必须包含候选场景事件及其得分**；使用 v0.5 报告时，已在0.55阈值下根本没有提出的低分切点不能从 JSON 中重新恢复。
+
+这个实验只把**两个相邻人工案例首尾直接相接**的时间定义为已确认的“案例间切点”。其余人工案例的边缘可能连接 UNKNOWN，不应该当作肯定的切点。还会将被接受的视频中未覆盖到的真值边界标为不可观测，不当作场景检测器的漏检。
+
+输出：不同阈值的 `matched_true_boundaries`（对人工案例相接处的有效命中）、`interior_split_proposals`（人工完整案例内部切点）及详细秒数；只是已有切点的**离线筛选**，不是重新运行算法，不能据此自动更新默认参数。
+
 ## 验收边界
 
 **CI 能证明**：流程对有效输入有可执行输出、同预算控制、历史输入兼容性与防止未标注片段误当负例。**真实效果必须由原片与人工标注验证**：
