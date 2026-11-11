@@ -1,4 +1,4 @@
-# video-incese · v0.6.0
+# video-incese · v0.7.0
 
 **目标**：从原始长视频中保留同时呈现白模动作视频和渲染后视频的连续 MP4 区间。正式产物始终是原始画面 MP4，JPG 只是通过 `--evidence` 明确启用时的审计证据。
 
@@ -48,6 +48,14 @@ video-incese --input "$SRC" --output "$BASE/no-cuts" --dry-run \
 **新流程：人工确认正例 → 从原始 MP4 提取每个正例的多窗口特征 → 全视频每个窗口（含旧版 `layout=none`）重复特征提取 → 逐窗口与人工正例匹配 → 候选片段拼接/场景分段 → 按相似度从高到低排序 → 可选只导出前 N 条。** 保留原来的 `video-incese` 作为对照基线，不把当前检索分数当成已验收的白模动作语义识别。
 
 命令、解释与人工审核协议：[docs/SIMILARITY.md](docs/SIMILARITY.md)。
+
+## v0.7：并行检索实验（不改变默认生产流程）
+
+新增 `video-incese-experiment`，读取已有的 `positive-profile.json` + `ranking.json` + 人工时间轴，通过**相同扫描窗口预算**对比 balanced、nearest、top3、centroid、motion 五条相似度检索路线，并分别测试原始分数和连续窗口 median3 平滑。其余扫描/切割行为沿用 v0.6；不自动替换默认方案，也不默认向现有输出写入人工标签。
+
+新扫描会记录 PiP 与 split 的两套特征假设，供不重新解码的实验使用。v0.6 历史 `ranking.json` 缺少另一套布局特征，仍可对照，但只能固定原来选中的布局进行重排，报告会注明这一限制。
+
+具体命令、人工标签冲突核查与指标口径：[docs/EXPERIMENTS.md](docs/EXPERIMENTS.md)。
 
 ## 当前实现与限制
 
