@@ -160,3 +160,45 @@ def test_learned_model_path_serializable(monkeypatch, tmp_path):
     settings = v.Settings(learned_model=tmp_path/"model.json")
     settings_dict = dataclasses.asdict(settings)
     assert settings_dict["learned_model"].name == "model.json"
+
+
+@needs_ffmpeg
+def test_real_animated_pip_video_keeps_motion_and_drops_static_reference(tmp_path):
+    """Full chain: encoded frames -> geometry -> temporal CV -> exported MP4."""
+    import subprocess
+
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    rng = np.random.default_rng(42)
+    bg = rng.integers(65, 105, size=(216, 384, 3), dtype=np.uint8)
+    bg = cv2.GaussianBlur(bg, (5, 5), 1.0)
+    for n in range(80):  # 10 seconds @ 8 fps
+        second = n / 8.0
+        frame = bg.copy()
+        gen_x = 42 + n % 18
+        cv2.rectangle(frame, (gen_x, 105), (gen_x + 52, 164), (240, 235, 230), -1)
+        if 2 <= second < 8:
+            frame[:73, 251:] = (25, 100, 165)
+            ref_x = 275 + ((n-16) % 12 if second < 6 else 7)
+            cv2.rectangle(frame, (ref_x, 16), (ref_x + 25, 54), (220, 245, 25), -1)
+        assert cv2.imwrite(str(frames / f"{n:03d}.png"), frame)
+    source = tmp_path / "moving.mp4"
+    subprocess.run([
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-framerate", "8", "-i", str(frames / "%03d.png"),
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source),
+    ], check=True)
+    out = tmp_path / "real-out"
+    ret = v.main([
+        "--input", str(source), "--output", str(out),
+        "--content-mode", "temporal-cv", "--sample-fps", "4",
+        "--temporal-fps", "4", "--temporal-step", "1",
+    ])
+    assert ret == 0
+    data = json.loads((out / "report.json").read_text())
+    exported = [c for c in data["clips"] if c["status"] == "exported"]
+    assert len(exported) >= 1, data["temporal"]
+    assert all(c["start"] >= 1.5 and c["end"] <= 7 for c in exported), exported
+    assert len(list((out/"clips").glob("*.mp4"))) == len(exported)
+    assert any(w["reason"] == "insufficient_temporal_evidence"
+               for w in data["temporal_windows"]), "Static reference interval not rejected"
