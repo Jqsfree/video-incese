@@ -19,6 +19,8 @@ from pathlib import Path
 from functools import partial
 
 from video_content import semantic_intervals
+from video_temporal_cv import scan_temporal
+from video_active import load_model
 
 import cv2
 import numpy as np
@@ -57,6 +59,10 @@ class Settings:
     boundary_tolerance: float = 0.125
     motion_delta: float = 0.3
     motion_min: float = 0.02
+    temporal_step: float = 1.0
+    temporal_fps: float = 4.0
+    learned_model: Path | None = None
+    learned_threshold: float = 0.60
     ollama_timeout: float = 300.0
     ollama_num_predict: int = 192
     ollama_think: bool = False
@@ -378,8 +384,31 @@ def process_file(source: Path, target: Path, settings: Settings) -> dict:
     candidates = time_intervals(observations, info["duration"], settings)
     prepared: list[dict] = []
     verification_trace: list[dict] = []
+    temporal_windows: list[dict] = []
+    temporal_stats: dict = {}
+    if settings.content_mode == "temporal-cv":
+        model = load_model(settings.learned_model)
+        refined_spans, temporal_windows, temporal_stats = scan_temporal(
+            source, candidates, settings, classify, model)
+        if temporal_stats.get("failed_windows"):
+            warnings.append(f"{len(temporal_stats['failed_windows'])} temporal windows could not "
+                            "be decoded or evaluated; see temporal.failed_windows")
+        by_candidate: dict[int, list[tuple[float, float]]] = {}
+        for a, b, candidate_id in refined_spans:
+            by_candidate.setdefault(candidate_id, []).append((a, b))
+        for candidate_id, (a, b) in enumerate(candidates, 1):
+            refined = by_candidate.get(candidate_id, [])
+            if not refined:
+                prepared.append({"start": a, "end": b,
+                                 "source_candidate": candidate_id, "status": "rejected_temporal"})
+            else:
+                for left, right in refined:
+                    prepared.append({"start": left, "end": right,
+                                     "source_candidate": candidate_id, "status": "candidate"})
     semantic_failures = 0
     for candidate_id, (start, end) in enumerate(candidates, 1):
+        if settings.content_mode == "temporal-cv":
+            continue
         if settings.content_mode == "layout":
             prepared.append({"start": start, "end": end, "source_candidate": candidate_id,
                              "status": "candidate"})
@@ -464,12 +493,20 @@ def process_file(source: Path, target: Path, settings: Settings) -> dict:
             entry["output"] = str(out)
     finally:
         cap.release()
-    report = {"input": str(source.resolve()), "video": info, "settings": asdict(settings),
+    serialized_settings = asdict(settings)
+    if settings.learned_model is not None:
+        serialized_settings["learned_model"] = str(settings.learned_model.expanduser().resolve())
+        temporal_stats["learned_model_version"] = model.get("model_version")
+        temporal_stats["label_fingerprint"] = model.get("label_fingerprint")
+    report = {"input": str(source.resolve()), "video": info, "settings": serialized_settings,
               "sampling": sampling, "warnings": warnings,
               "samples": [asdict(o) for o in observations], "clips": clips,
               "source_candidates": len(candidates), "verification_trace": verification_trace,
-              "note": ("Semantic mode uses multi-frame dual-motion checks and per-window VLM decisions. "
-                       "Boundary locations are estimates, not ground truth."
+              "temporal": temporal_stats, "temporal_windows": temporal_windows,
+              "note": ("Temporal-CV mode uses CPU-only two-region motion and optical flow; "
+                       "white-model/render correspondence is NOT semantically verified."
+                       if settings.content_mode == "temporal-cv" else
+                       "Semantic mode uses sampled images and VLM decisions."
                        if settings.content_mode == "semantic" else
                        "Layout-only mode can include unrelated picture-in-picture content.")}
     target.mkdir(parents=True, exist_ok=True)
@@ -490,9 +527,17 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--pip-horizontal", type=float, default=3)
     p.add_argument("--split-threshold", type=float, default=26)
     p.add_argument("--ollama-model", default=None, help="EXPERIMENTAL: local vision model e.g. qwen3-vl:4b")
-    p.add_argument("--content-mode", choices=("layout", "semantic"), default="semantic",
-                   help="semantic (default): require dual video motion and Ollama verification; "
-                        "layout: old geometry-only baseline")
+    p.add_argument("--content-mode", choices=("temporal-cv", "layout", "semantic"), default="temporal-cv",
+                   help="temporal-cv (default): CPU-only two-region motion; "
+                        "layout: geometry baseline; semantic: slow Ollama VLM")
+    p.add_argument("--temporal-step", type=float, default=1.0,
+                   help="Length of each CPU temporal window, seconds (default 1)")
+    p.add_argument("--temporal-fps", type=float, default=4.0,
+                   help="CPU sample frames per second within each temporal window")
+    p.add_argument("--learned-model", type=Path, default=None,
+                   help="Optional JSON model trained from human review labels")
+    p.add_argument("--learned-threshold", type=float, default=.60,
+                   help="Minimum learned probability to keep a temporal window")
     p.add_argument("--semantic-step", type=float, default=1.0,
                    help="Seconds between VLM scan probes in semantic mode")
     p.add_argument("--boundary-tolerance", type=float, default=0.125,
@@ -525,6 +570,15 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("Invalid semantic step, boundary tolerance, motion delta or motion minimum")
         if not (5 <= settings.ollama_timeout <= 3600 and 64 <= settings.ollama_num_predict <= 2048):
             raise ValueError("Require 5 <= ollama-timeout <= 3600 and 64 <= ollama-num-predict <= 2048")
+        if not (.25 <= settings.temporal_step <= 5.0
+                and 2 <= settings.temporal_fps <= 16
+                and 0.5 <= settings.learned_threshold <= 0.95):
+            raise ValueError("Require .25 <= temporal-step <= 5, 2 <= temporal-fps <= 16, "
+                             "and .5 <= learned-threshold <= .95")
+        if settings.learned_model and settings.content_mode != "temporal-cv":
+            raise ValueError("--learned-model requires --content-mode temporal-cv")
+        if settings.content_mode == "temporal-cv" and settings.ollama_model:
+            raise ValueError("temporal-cv does not call Ollama; remove --ollama-model")
         if settings.content_mode == "semantic" and not settings.ollama_model:
             raise ValueError("Semantic mode requires --ollama-model (e.g. qwen3-vl:4b). "
                              "Use --content-mode layout only for geometry-only diagnostics.")
@@ -555,7 +609,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"warning: {w}", file=sys.stderr)
         for i, c in errors:
             print(f"error: clip {i} ({c['start']:.3f}-{c['end']:.3f}s) {c['status']}: {c.get('error', '')}", file=sys.stderr)
-        incomplete = report["sampling"]["incomplete"]
+        incomplete = report["sampling"]["incomplete"] or bool(report.get("temporal", {}).get("failed_windows"))
         print(json.dumps({"input": str(source), "output": str(target), "candidates": len(report["clips"]),
                           "accepted": n, "errors": len(errors), "warnings": len(report["warnings"]),
                           "incomplete": incomplete, "report": str(target / "report.json")}, ensure_ascii=False))
