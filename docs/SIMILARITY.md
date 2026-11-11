@@ -99,7 +99,28 @@ video-incese-rank scan --help
 1. 检查构建日志：28 段是否全部提取成功，特别是之前没有进入时序检测的案例 12、15、18。若 `geometry_fallback_windows` 大于零，说明确实执行了布局兜底，但不能以此证明选对了区域。
 2. `scan` 的 `geometry_none_but_scored` 说明有多少旧版未处理的窗口被纳入新排序；人工确认前不能认定新增窗口有效。
 3. 将 rank Top 20/50 与随机低排名窗口分层人工复核，记录每段 `keep/reject/unsure`；别把未看过的低排名当 reject。
-4. 使用 `video-incese-eval --report ... --truth ...` 仅评估原版的导出格式；检索排名新格式不是相同的 report.json，不能误把 `ranking.json` 填入评估命令。目前需要独立的**排序指标**（例如 Precision@20、已人工确认正例的 Recall@K），依靠人工审核才能得到。
+4. 本版本新增 `video-incese-rank evaluate` 专门评估相似度排名结果（见下文）。`video-incese-eval --report ...` 仍只评估旧版 report.json，不能把 ranking.json 当旧 report。Top-K 的人工正例时间召回率可以计算，但 **Precision@K 在未标注预测仍是 UNKNOWN 时严格保持 null**，必须人工检查高排名候选才可能计算真实精度。
 5. 在**完全不同的原始视频**上做盲测；原片2用来构建正例时，原片2上的相似度结果是自检，不是可作为测试集的成绩。
 
 如果排序对人工样本确实有效，再做下一阶段：利用被确认的正/负例校准阈值、优化真实区域位置、学习同一案例内部镜头变化与案例间边界。不要直接让未验证的高相似度自动生产正式交付数据。
+
+
+## 六、Top-K 召回评估（不需要重新扫描视频）
+
+在原片2完整扫描的结果上评估不同审查预算下覆盖了多少已确认案例：
+
+```bash
+video-incese-rank scan \
+  --input "$SRC" --profile "$OUT/positive-profile.json" \
+  --output "$OUT/original2-all" --boundary-mode scene
+
+video-incese-rank evaluate \
+  --ranking "$OUT/original2-all/ranking.json" \
+  --truth "$TRUTH" \
+  --top-k 10 20 50 100 \
+  --output "$OUT/original2-all/evaluation.json"
+```
+
+注意：**不要**在做原片2已知 28 段的正例召回对照时加 `--exclude-reviewed`，否则已知正例已经被排除，召回天然接近零；`--exclude-reviewed` 只用于寻找原片2未审查区域的新候选。因原片2就是特征库来源，这仍是训练源上的开发自检；不能称为独立准确率。
+
+输出包含 `annotated_positive_time_recall`、`one_to_one_iou_matches`、`split_positive_cases`、`merged_positive_cases_in_prediction`，以及 `precision_at_k: null`。如需质量排序指标，必须把高排名和低排名都抽样人工审查，不能把未审过的结果视为不合格。
