@@ -14,6 +14,8 @@ from typing import Callable
 import cv2
 import numpy as np
 
+from video_motion import temporal_motion
+
 
 @dataclass(frozen=True)
 class ContentProbe:
@@ -24,6 +26,7 @@ class ContentProbe:
     reference_motion: float
     generated_motion: float
     phase: str = "scan"
+    motion_details: dict | None = None
 
 
 def _regions(frame: np.ndarray, layout: str, pip_x: float, pip_y: float) -> tuple[np.ndarray, np.ndarray]:
@@ -108,21 +111,28 @@ def semantic_intervals(
             result = ContentProbe(round(t, 4), False, "insufficient_temporal_context", "none", 0, 0, phase)
         else:
             first = _capture(cap, left)
+            early = _capture(cap, (left + t) / 2)
             middle = _capture(cap, t)
+            late = _capture(cap, (right + t) / 2)
             last = _capture(cap, right)
             layout, _, _ = classify(middle, settings)
             if layout == "none":
                 result = ContentProbe(round(t, 4), False, "no_comparison_layout", "none", 0, 0, phase)
             else:
-                rm, gm = motion_pair(first, last, layout, settings.pip_x, settings.pip_y)
-                if min(rm, gm) < settings.motion_min:
+                rm, gm, has_motion, details = temporal_motion(
+                    [first, early, middle, late, last],
+                    layout, settings.pip_x, settings.pip_y,
+                    min_changed=settings.motion_min,
+                    min_residual=settings.motion_residual_min,
+                    consistency=settings.motion_consistency)
+                if not has_motion:
                     result = ContentProbe(round(t, 4), False, "missing_dual_video_motion",
-                                          layout, round(rm, 4), round(gm, 4), phase)
+                                          layout, round(rm, 4), round(gm, 4), phase, details)
                 else:
                     approved, reason = verify([first, middle, last], settings.ollama_model)
                     result = ContentProbe(round(t, 4), bool(approved),
                                           reason if reason else ("matched" if approved else "semantic_rejected"),
-                                          layout, round(rm, 4), round(gm, 4), phase)
+                                          layout, round(rm, 4), round(gm, 4), phase, details)
         probes[key] = result
         return result
 
