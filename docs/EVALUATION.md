@@ -29,14 +29,14 @@ SRC="/Users/muse/Downloads/白模/原片2/原片2.mp4"
 BASE="$HOME/Movies/video-incese-v050"
 TRUTH="$HOME/Movies/video-incese-eval/truth-original2.json"
 
-video-incese --input "$SRC" --output "$BASE/old-cuts" --content-mode temporal-cv \
+video-incese --input "$SRC" --output "$BASE/old-cuts" --content-mode temporal-cv --dry-run \
   --boundary-mode scene --boundary-threshold .42 --boundary-min-segment .85
 
-video-incese --input "$SRC" --output "$BASE/conservative" --content-mode temporal-cv \
+video-incese --input "$SRC" --output "$BASE/conservative" --content-mode temporal-cv --dry-run \
   --boundary-mode scene --boundary-threshold .55 --boundary-min-segment 2 \
   --motion-diagnostics
 
-video-incese --input "$SRC" --output "$BASE/no-cuts" --content-mode temporal-cv \
+video-incese --input "$SRC" --output "$BASE/no-cuts" --content-mode temporal-cv --dry-run \
   --boundary-mode off
 
 for name in old-cuts conservative no-cuts; do
@@ -45,7 +45,7 @@ for name in old-cuts conservative no-cuts; do
 done
 ```
 
-如果此前已经有 `report.json`，无需重新编码，直接运行评估 CLI 即可。
+三组对照使用 `--dry-run`，只扫描不导出 MP4，能节省对照时反复编码的时间；评估 CLI 会将 `dry_run` 时间区间视作预测。确认最优参数后，去掉 `--dry-run` 再进行正式 MP4 导出。如果此前已有 `report.json`，不必重新扫描或编码，直接运行评估 CLI 即可。
 
 ## 如何理解报告字段
 
