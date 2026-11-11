@@ -146,6 +146,7 @@ def evaluate(report: dict, truth: dict, *, iou_threshold: float = .5) -> dict:
             "index": i, "start": p[0], "end": p[1], "coverage_fraction": round(coverage, 5),
             "overlapping_clips": hits, "_unrounded_coverage": coverage,
         })
+    covered_95 = sum(x["_unrounded_coverage"] >= .95 for x in positive_details)
     for case in positive_details:
         case.pop("_unrounded_coverage")
     merges = sum(sum(_overlap(x, p) >= .25 for p in positives) > 1
@@ -166,7 +167,7 @@ def evaluate(report: dict, truth: dict, *, iou_threshold: float = .5) -> dict:
         "annotated_positive_seconds": round(gt_seconds, 5),
         "positive_covered_seconds": round(positive_hit, 5),
         "positive_time_recall": round(positive_hit / gt_seconds, 5),
-        "positive_clips_95pct_covered": sum(x["_unrounded_coverage"] >= .95 for x in positive_details),
+        "positive_clips_95pct_covered": covered_95,
         "confirmed_negative_seconds": round(_length(negatives), 5),
         "confirmed_negative_predicted_seconds": round(negative_hit, 5),
         "confirmed_negative_false_accept_rate": (
