@@ -20,6 +20,7 @@ from functools import partial
 
 from video_content import semantic_intervals
 from video_temporal_cv import scan_temporal
+from video_boundaries import scan_boundaries, split_spans, BOUNDARY_VERSION
 from video_active import load_model
 
 import cv2
@@ -62,6 +63,10 @@ class Settings:
     temporal_step: float = 1.0
     temporal_fps: float = 4.0
     temporal_context_gap: float = 2.0
+    boundary_mode: str = "scene"
+    boundary_fps: float = 2.5
+    boundary_threshold: float = 0.42
+    boundary_min_separation: float = 0.85
     learned_model: Path | None = None
     learned_threshold: float = 0.60
     ollama_timeout: float = 300.0
@@ -387,6 +392,8 @@ def process_file(source: Path, target: Path, settings: Settings) -> dict:
     verification_trace: list[dict] = []
     temporal_windows: list[dict] = []
     temporal_stats: dict = {}
+    boundary_events: list[dict] = []
+    boundary_stats: dict = {"mode": "off", "accepted_events": 0, "failed_samples": []}
     if settings.content_mode == "temporal-cv":
         model = load_model(settings.learned_model)
         refined_spans, temporal_windows, temporal_stats = scan_temporal(
@@ -394,18 +401,32 @@ def process_file(source: Path, target: Path, settings: Settings) -> dict:
         if temporal_stats.get("failed_windows"):
             warnings.append(f"{len(temporal_stats['failed_windows'])} temporal windows could not "
                             "be decoded or evaluated; see temporal.failed_windows")
-        by_candidate: dict[int, list[tuple[float, float]]] = {}
-        for a, b, candidate_id in refined_spans:
-            by_candidate.setdefault(candidate_id, []).append((a, b))
+        if settings.boundary_mode == "scene":
+            try:
+                boundary_events, boundary_stats = scan_boundaries(
+                    source, refined_spans, settings, classify)
+            except (RuntimeError, OSError, cv2.error, ValueError) as exc:
+                # An independent boundary pass must not discard accepted
+                # content if boundary analysis itself fails.
+                warnings.append(f"Scene-boundary analysis failed: {exc}; "
+                                "falling back to unsplit accepted spans")
+                boundary_stats = {"mode": BOUNDARY_VERSION, "status": "scan_error",
+                                  "error": str(exc), "accepted_events": 0,
+                                  "failed_samples": []}
+            if boundary_stats.get("failed_samples"):
+                warnings.append(f"{len(boundary_stats['failed_samples'])} scene-boundary "
+                                "samples were unreadable; see boundaries.failed_samples")
+        partitioned = split_spans(refined_spans, boundary_events)
+        by_candidate: dict[int, list[dict]] = {}
+        for piece in partitioned:
+            by_candidate.setdefault(piece["source_candidate"], []).append(piece)
         for candidate_id, (a, b) in enumerate(candidates, 1):
             refined = by_candidate.get(candidate_id, [])
             if not refined:
                 prepared.append({"start": a, "end": b,
                                  "source_candidate": candidate_id, "status": "rejected_temporal"})
             else:
-                for left, right in refined:
-                    prepared.append({"start": left, "end": right,
-                                     "source_candidate": candidate_id, "status": "candidate"})
+                prepared.extend(refined)
     semantic_failures = 0
     for candidate_id, (start, end) in enumerate(candidates, 1):
         if settings.content_mode == "temporal-cv":
@@ -504,10 +525,11 @@ def process_file(source: Path, target: Path, settings: Settings) -> dict:
               "samples": [asdict(o) for o in observations], "clips": clips,
               "source_candidates": len(candidates), "verification_trace": verification_trace,
               "temporal": temporal_stats, "temporal_windows": temporal_windows,
-              "note": ("Temporal-CV uses CPU-only two-region motion and optical flow, "
-                       "plus bounded context recovery of uncertain gaps. "
-                       "Context-rescued windows are NOT proof of semantic white-model/render correspondence; "
-                       "review them for accidental false-positive bridging."
+              "boundaries": boundary_stats, "boundary_events": boundary_events,
+              "note": ("Temporal-CV detects accepted intervals; an independent optional scene "
+                       "stage partitions those intervals on supported visual cuts. "
+                       "Neither stage proves semantic white-model/render correspondence; "
+                       "review scene boundaries and context-rescued windows."
                        if settings.content_mode == "temporal-cv" else
                        "Semantic mode uses sampled images and VLM decisions."
                        if settings.content_mode == "semantic" else
@@ -540,6 +562,15 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--temporal-context-gap", type=float, default=2.0,
                    help="Max seconds of uncertain dual-video gap bridged with adjacent evidence; "
                         "0 disables context recovery (default: 2)")
+    p.add_argument("--boundary-mode", choices=("scene", "off"), default="scene",
+                   help="Split accepted temporal spans at CPU dual-region scene cuts; "
+                        "off reproduces v0.3-style joining")
+    p.add_argument("--boundary-fps", type=float, default=2.5,
+                   help="Samples per second for independent scene-boundary scan")
+    p.add_argument("--boundary-threshold", type=float, default=.42,
+                   help="Minimum BOTH-panel scene-change score, 0..1")
+    p.add_argument("--boundary-min-separation", type=float, default=.85,
+                   help="Minimum time between scene cuts and accepted-span edges")
     p.add_argument("--learned-model", type=Path, default=None,
                    help="Optional JSON model trained from human review labels")
     p.add_argument("--learned-threshold", type=float, default=.60,
@@ -582,6 +613,12 @@ def main(argv: list[str] | None = None) -> int:
                 and 0.5 <= settings.learned_threshold <= 0.95):
             raise ValueError("Require .25 <= temporal-step <= 5, 2 <= temporal-fps <= 16, "
                              "0 <= temporal-context-gap <= 3, and .5 <= learned-threshold <= .95")
+        if not (1 <= settings.boundary_fps <= 12
+                and 0.15 <= settings.boundary_threshold <= 0.95
+                and 0.25 <= settings.boundary_min_separation <= 10):
+            raise ValueError("Require 1 <= boundary-fps <= 12, "
+                             ".15 <= boundary-threshold <= .95, "
+                             ".25 <= boundary-min-separation <= 10")
         if settings.learned_model and settings.content_mode != "temporal-cv":
             raise ValueError("--learned-model requires --content-mode temporal-cv")
         if settings.content_mode == "temporal-cv" and settings.ollama_model:

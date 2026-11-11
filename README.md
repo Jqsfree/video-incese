@@ -1,10 +1,10 @@
-# video-incese · v0.3.2
+# video-incese · v0.4.0
 
 **目标**：从原始长视频中保留同时呈现白模动作视频和渲染后视频的连续 MP4 区间。正式产物始终是原始画面 MP4，JPG 只是通过 `--evidence` 明确启用时的审计证据。
 
 ## 当前实现与限制
 
-默认切换为 **temporal-cv**：OpenCV 识别 PiP / 左右分屏候选，在两个区域分别分析连续帧的运动、光流覆盖和场景转场，对满足双区域时序证据的连续窗口用 FFmpeg 导出 MP4。不调用 Ollama，也不需要 GPU。
+默认使用 **temporal-cv**：OpenCV 检查 PiP / 左右分屏候选，分析两个区域的运动和光流，将有效时序窗口交给独立场景边界检测器。边界检测器只检查已接受区间的双区域突变，并在有证据的切点处拆分；再用 FFmpeg 导出 MP4。不调用 Ollama 或 GPU。
 
 **严格边界**：该模式只识别有持续动态内容的两个区域，并不能单凭运动证明“白模对应渲染视频”、区分两个碰巧同时动的教程窗口；对静止白模、低动作幅度或布局移动的场景可能漏检。结果是**时序候选**，需要用人工标注验收；不能声称真实准确率已经改善。
 
@@ -134,3 +134,61 @@ video-incese-learn import-positive \
 
 以上只基于四段已知正例发现缺陷，不能证明长原片的误收率改善；请将
 第一轮原片分段与人剪结果对比，并优先查看上下文恢复的片段。 
+
+## v0.4.0：内容检测和场景边界解耦
+
+**基线证据（不是 v0.4 的实测结果）**：原片2共 28 条人工剪辑（535.4s）。v0.3.2 baseline 时间召回 66.2%，IoU≥0.5 为 2/28；763.5–925.5s 被合并为 162s 长段。model-v1 在原片2的时间召回仅 42.3%，因此本版默认不加载模型。
+
+流水线：temporal-cv 原有时序内容检测 → 独立的 video_boundaries.py 双区域场景突变检测 → split_spans 保留原接受时长的分段组织 → FFmpeg MP4 导出。
+
+- 边界仅在参考和渲染两个区域**同时发生显著突变**、且强于局部运动基线时成立。单区域变化或 PiP/分屏布局切换本身不是硬切点。
+- temporal_windows 保留原内容判定与概率；新增 report.json 中的 boundaries、boundary_events：切点位置、变化分数、近似时间误差、状态、来源。每个 clips 条目记录 boundary_before / boundary_after。
+- 边界阶段失败会记录 scan_error 和警告，并回退到旧连续区间，不丢弃通过内容检测的窗口。
+- 这是视觉硬转场检测，不是语义上的“新案例”识别：相似场景、渐变转场、单边画面变化仍可能合并；剧烈双区域镜头变化也可能误切。真实原片2尚需验证，不能以新增代码代替效果验收。
+
+### Mac 拉取、运行两组对照
+
+先进入实际**源码仓库**（不能在 ~/Movies/video-incese-* 输出目录运行 git）：
+
+```bash
+cd "$HOME/Projects/video-incese"
+git pull --ff-only origin main
+source .venv/bin/activate
+python -m pip install -e '.[dev]'
+python -m pytest -q
+```
+
+如仓库不在 ~/Projects/video-incese，改成真实源码路径。以下两组均不使用 model-v1，隔离边界检测的效应：
+
+```bash
+SRC="/Users/muse/Downloads/白模/原片2/原片2.mp4"
+BASE="$HOME/Movies/video-incese-validation-v040"
+
+video-incese --input "$SRC" --output "$BASE/boundary-off" \
+  --content-mode temporal-cv --temporal-context-gap 2 --boundary-mode off
+
+video-incese --input "$SRC" --output "$BASE/boundary-on" \
+  --content-mode temporal-cv --temporal-context-gap 2 \
+  --boundary-mode scene --boundary-fps 2.5 \
+  --boundary-threshold 0.42 --boundary-min-separation 0.85
+```
+
+```bash
+python - "$BASE" <<'PY'
+import json, sys
+from pathlib import Path
+for key in ('boundary-off', 'boundary-on'):
+    report = json.loads((Path(sys.argv[1]) / key / 'report.json').read_text())
+    print(key, {
+        'exported_clips': sum(c['status']=='exported' for c in report['clips']),
+        'accepted_temporal_windows': sum(w['accepted'] for w in report['temporal_windows']),
+        'boundary_events': report['boundaries']['accepted_events'],
+        'failed_boundary_samples': len(report['boundaries'].get('failed_samples', [])),
+        'warnings': report['warnings'],
+    })
+PY
+```
+
+验收要求：on/off 的时序通过数量与总通过时长相同；按人工28段对齐 IoU≥0.5、时间召回、边界误差与已确认的误收，同时保留未穷尽人工清单中的 unknown 区间。新逻辑有问题用 --boundary-mode off 回退，不要用 model-v1 的精度变化解释边界效果。
+
+**现阶段限制**：固定 PiP / 分屏区域仍可能漏检；未建立语义案例连续性判定；新的硬转场检测可能无法拆开所有 162s 案例。此版不重新训练 model-v1。
