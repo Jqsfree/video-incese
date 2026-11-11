@@ -1,108 +1,80 @@
-# video-incese
+# video-incese · v0.3.0
 
-自动提取 **参考动画/三维模型与对应生成视频同时出现** 的长视频区间，支持画中画和左右分屏。目标是内容共现而非单纯镜头分割。macOS（Apple Silicon/Intel）与 Ubuntu 均可运行。原文件不改动。
+**目标**：从原始长视频中保留同时呈现白模动作视频和渲染后视频的连续 MP4 区间。正式产物始终是原始画面 MP4，JPG 只是通过 `--evidence` 明确启用时的审计证据。
 
-## v0.2 核心变化
+## 当前实现与限制
 
-旧版只识别画面几何布局，网站操作、Blender、静态角色设定图都会误收。**v0.2 默认启用语义模式**，通过三层过滤：
+默认切换为 **temporal-cv**：OpenCV 识别 PiP / 左右分屏候选，在两个区域分别分析连续帧的运动、光流覆盖和场景转场，对满足双区域时序证据的连续窗口用 FFmpeg 导出 MP4。不调用 Ollama，也不需要 GPU。
 
-1. **布局初筛**：OpenCV 检测右上 PiP / 居中左右分屏（保留原来两个阈值检测器）。
-2. **双区域运动 + 多帧内容识别**：同一区间抽取前、中、后 3 帧，分别衡量两个画面区域的运动；两个区域都具有时间变化才交由本地 Ollama 视觉模型，模型按角色/动作对应、两边是否视频、是否软件教程等进行判定。仅凭分屏线不会通过。
-3. **边界细化**：默认每 1 秒做语义判断；有正负判定切换时，对时间点二分重检，默认缩小到 0.125 秒的判定区间；**遇到明确拒绝窗口绝不跨越合并**。这是基于有限采样的边界估计，不是逐帧人工真值，也不能证明每一帧都满足条件。
+**严格边界**：该模式只识别有持续动态内容的两个区域，并不能单凭运动证明“白模对应渲染视频”、区分两个碰巧同时动的教程窗口；对静止白模、低动作幅度或布局移动的场景可能漏检。结果是**时序候选**，需要用人工标注验收；不能声称真实准确率已经改善。
 
-## macOS 安装
+当前候选布局还使用固定右上 PiP / 中线分屏，不支持所有画中画位置。时间边界精度受 `--temporal-step` 和分区探测影响；每段报告里 `temporal.boundary_uncertainty_seconds` 是采样区间尺度，不是实测误差。
+
+## Mac 更新与测试
 
 ```bash
-brew install python@3.12 ffmpeg git
-git clone https://github.com/Jqsfree/video-incese.git
 cd video-incese
-python3.12 -m venv .venv
+git pull --ff-only origin main
 source .venv/bin/activate
 python -m pip install -e '.[dev]'
 python -m pytest -q
+
+video-incese \\
+  --input "/Users/muse/Downloads/白模/原片1/原片1.mp4" \\
+  --output "$HOME/Movies/video-incese-round1" \\
+  --content-mode temporal-cv \\
+  --sample-fps 2 --temporal-fps 4 --temporal-step 1
 ```
 
-语义模式依赖本机运行 Ollama，模型由用户明确下载；**无需 CUDA、无云端密钥**。安装 Ollama 后：
+这条命令**不需要** `--ollama-model`，**不包含** `--dry-run`，因此会输出真正的 MP4。检测报告是 `report.json`，正式输出是 `clips/*.mp4`。如果只需要检查候选时间区间而暂不重编码，添加 `--dry-run`；如果希望看原片证据帧，添加 `--evidence`。
+
+## 主动学习：每轮人工反馈，训练下一轮模型
+
+主动学习不是把上轮模型的预测重新喂给自己。这里使用 **不确定性＋特征差异** 排序，优先向人索取少量有代表性的标签；人手标注才参与训练，保留报告、标签、特征版本和训练指纹。无需 LLM，使用 NumPy 实现的轻量正则化 Logistic 回归。
+
+### 第 1 轮：生成复核队列
 
 ```bash
-ollama pull qwen3-vl:4b
-ollama list
+video-incese-learn queue \\
+  --report "$HOME/Movies/video-incese-round1/report.json" \\
+  --output "$HOME/Movies/video-incese-round1/review.csv" \\
+  --budget 24 \\
+  --preview-dir "$HOME/Movies/video-incese-round1/review-mp4"
 ```
 
-## 先只检测，再实际导出
+`review.csv` 逐行包含时间范围、建议、概率、预览 MP4 文件路径。用表格编辑器在 `label` 列**人工填写** `keep`（保留）/ `reject`（剔除）/ `unsure`（不用于训练）。注意：每行是一个 **时间窗口** 而不是整条候选，误切边界时可逐窗反馈。
+
+### 第 2 轮：显式训练
+
+至少 12 个已标注窗口，且每类不少于 4 个，才允许训练，防止极少量单类样本导致失控。训练不会改变旧模型或已有视频，必须明确运行：
 
 ```bash
-# 推荐：严格内容模式。默认 content-mode=semantic，缺失模型会明确报错而不是退回几何模式
-video-incese --input "$HOME/Movies/source.mp4" \
-  --output "$HOME/Movies/incese-check" \
-  --ollama-model qwen3-vl:4b --dry-run --evidence
+video-incese-learn train \\
+  --labels "$HOME/Movies/video-incese-round1/review.csv" \\
+  --output "$HOME/Movies/video-incese-model-v1.json"
 
-# 查看 report.json 中的 clips 和 verification_trace，确认后实际导出
-video-incese --input "$HOME/Movies/source.mp4" \
-  --output "$HOME/Movies/incese-output" \
-  --ollama-model qwen3-vl:4b --evidence
-
-# 需要更多时序采样（更慢、更贵）
-video-incese --input "$HOME/Movies/source.mp4" \
-  --output "$HOME/Movies/incese-dense" \
-  --sample-fps 4 --semantic-step .5 --boundary-tolerance .125 \
-  --ollama-model qwen3-vl:4b --evidence
-
-# 旧算法只作基线调试；不应当视为有效内容分类
-video-incese --input "$HOME/Movies/source.mp4" \
-  --output "$HOME/Movies/incese-layout-only" --content-mode layout --dry-run
+video-incese \\
+  --input "/Users/muse/Downloads/白模/原片1/原片1.mp4" \\
+  --output "$HOME/Movies/video-incese-round2" \\
+  --content-mode temporal-cv \\
+  --learned-model "$HOME/Movies/video-incese-model-v1.json" \\
+  --learned-threshold 0.6
 ```
 
-输入路径支持中文与空格。每次输出到独立目录以避免旧文件混淆。若已克隆仓库，使用 `git pull --ff-only origin main` 更新，并重新执行 `pip install -e '.[dev]'`。
+继续：`queue --report round2/report.json --output round2/review.csv`，人工校正，再执行 `train --labels round1/review.csv --labels round2/review.csv --output model-v2.json`。
 
-## 输出契约
+训练集准确率只是内部诊断，**不能替代独立原片的时间 Precision/Recall**；不同轮次应保留固定测试片段，不用于训练。学习模型当前仅作为时序通过窗口的**额外过滤条件**，可以降低部分误收，但无法找回布局检测阶段的漏检，也不能证明语义对应关系。
 
-```text
-incese-output/
-  clips/             # 通过语义检查的连续片段 MP4；无命中时不生成
-  evidence/          # 抽帧证据；被拒绝候选 *_rejected.jpg
-  report.json        # 几何采样、语义探测、起止时间、状态、错误
-```
+## 报告与退出码
 
-`report.json` 中的 `verification_trace` 记录每个源候选的多帧判定：`time`、`match`、`layout`、`reference_motion`、`generated_motion`、`reason`、`phase`（scan/boundary）。`clips[].source_candidate` 可追溯原始布局区间；一段混合候选可以分成多个 MP4。
+`report.json` 包含原视频信息、几何候选、`temporal_windows`（窗口时间、特征、人工审核可定位 ID、启发式分数、学习模型概率、接受状态和原因）、`temporal`（速度与失败窗口）、`clips`（实际 MP4 和状态）。解码失败窗口不会被保留；模型文件版本不兼容时明确报错，不会退回静默的旧模型。
 
-默认参数：`--sample-fps 2`（布局）、`--semantic-step 1`（语义时间步长）、`--motion-delta .3`（三帧时间半径）、`--motion-min .02`（运动像素比例）、`--boundary-tolerance .125`、`--min-duration .8`、`--merge-gap 2.6`（仅影响原布局候选预筛，语义不跨拒绝窗口合并）、`--layout auto|pip|split`、`--pip-x .655`、`--pip-y .338`。
+保留旧模式：`--content-mode layout`（纯几何基线）和 `--content-mode semantic --ollama-model qwen3-vl:4b-instruct`（昂贵的本地视觉审核，非默认）。
 
-## 本地 Ollama 推理超时排障（v0.2.1）
+### 注意
 
-v0.2.0 的每次 VLM 请求固定 180 秒；`qwen3-vl:8b` 是 **Thinking-only** 版本，不支持通过 `think:false` 切换到非思考模式。Ollama 维护者确认应换用独立的 `qwen3-vl:8b-instruct`，内存紧张优先 `qwen3-vl:4b-instruct`。v0.2.1 默认发送 `think=false`、`num_predict=192`、模型保活 20 分钟、可配置单请求超时（默认 300 秒）。对于已知 Thinking-only Qwen3-VL 标签默认提前报错并指导改用 Instruct，而不是浪费数次超时。若明确选择 `--ollama-think --ollama-num-predict 2048`，允许慢速试验；绝不悄悄退回仅几何筛选。
+- `--preview-dir` 只为主动学习选中的少量窗口生成视频复核片段，不创建 JPG；`--evidence` 默认关闭。
+- 输出目录每轮应独立，避免历史 MP4 残留。模型、标注与每轮报告应妥善备份；不要把用户本地视频和标签提交到公共 GitHub。
+- 运行时间和误收率尚未在用户的完整真实视频上实测，不给出未经证实的性能承诺。
 
-```bash
-ollama --version
-ollama list
-ollama ps
-ollama pull qwen3-vl:4b-instruct    # 16GB Mac 上优先试这个
-# 或：ollama pull qwen3-vl:8b-instruct
-curl -sS http://127.0.0.1:11434/api/tags | python -m json.tool | head -60
-
-# 先用短片段或完整视频的较大时间步长做冒烟测试
-video-incese --input "$HOME/Movies/source.mp4" \
-  --output "$HOME/Movies/incese-smoke" \
-  --ollama-model qwen3-vl:4b-instruct \
-  --ollama-timeout 600 --semantic-step 3 \
-  --dry-run
-```
-
-`ollama ps` 的 PROCESSOR 字段可判断是否 100% GPU 或存在 CPU 分担/掉速。可用 `ollama run qwen3-vl:4b-instruct "请只回答 OK"` 区分模型基本加载与三帧视觉处理问题。注意 `--dry-run` **照样执行全部视觉推理**，仅跳过 MP4 导出。较大 `--semantic-step` 只用于烟测，可能漏掉短有效片段，最终抽检建议恢复 `1` 或更小。
-
-仍超时时不要继续对完整原片重试：先检查 Mac 内存压力、GPU 占用、Ollama 模型及版本，测试单帧推理；可考虑 `qwen3-vl:4b-instruct` 或 `qwen3-vl:8b-instruct`，但新模型需下载且不保证更准。提高 timeout 只能避免正常慢推理被截断，不能修复模型卡死/内存不足。具体本地速度与正确率未验证。
-
-## 故障与质量边界
-
-- `frame_error` / `verification_error` / `verification_skipped` / `export_error`：记录在 report，退出码 **1**。模型失效不会自动转成布局模式或被当作匹配。
-- 视频末尾未分析超过允许范围：`sampling.incomplete=true`，退出码 **2**；少量孤立解码错误会计入警告。
-- `rejected_semantic` 不是程序故障；`--dry-run` 不导出视频。
-- 几何候选不会覆盖所有布局，尤其是不同位置的画中画、无明显边框或其他分屏形式。
-- 运动门槛会牺牲极低运动参考片段的召回率；摄像机移动、转场也可能造成虚假的运动证据，故仍须视觉模型判断。
-- 视觉模型输出不是人工真值，甚至多帧仍可能误判教程、静态参考或动作对应；**本地实际模型效果和真实端到端 Precision/Recall 尚未经过独立验证，不能声称生产验收通过**。
-- 当正负内容在一个语义采样间隔内快速交替，可能漏掉过短片段；建议缩短 `--semantic-step` 并检查 `verification_trace`。对高价值片段建议人工验收，最大时间精度不能直接等于边界误差。
-- 输出采用 FFmpeg 重新编码，保留可用音轨并使用精确时间戳；输入视频不写入。
-
-## 验收
-
-先对包含真正正负例的完整长视频标注区间，至少区分：真实模型对照、工具网页、Blender 编辑器、静态参考图、单独生成片段、不相关双视频和正负混合片段。检验误收、漏收与边界偏差，并保留 `report.json` 与 `evidence/`。合成测试和组件级测试并不能证明实际 VLM 精度。
+技术研究依据见 [研究 RFC](docs/temporal-video-segmentation-rfc.md)。
