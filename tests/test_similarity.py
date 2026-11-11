@@ -156,7 +156,10 @@ def test_end_to_end_manual_positive_extraction_and_full_timeline_scanning(
     unseen, excluded = sim.scan_windows(path, profile, settings, step=2, fps=3,
                                         exclude_reviewed=True)
     assert excluded["same_source_as_training"]
-    assert len(unseen) == 2
+    assert len(unseen) == 4
+    assert all(not any(max(0, min(w["end"], c["end"]) -
+                           max(w["start"], c["start"])) > 0
+                       for c in profile["cases"]) for w in unseen)
     path_copy = tmp_path / "copy.mp4"
     path_copy.write_bytes(path.read_bytes())
     with pytest.raises(ValueError, match="original training source"):
