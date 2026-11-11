@@ -27,18 +27,18 @@ python -m pytest -q
 ```bash
 SRC="/Users/muse/Downloads/白模/原片2/原片2.mp4"
 BASE="$HOME/Movies/video-incese-v050"
-video-incese --input "$SRC" --output "$BASE/conservative" \
+video-incese --input "$SRC" --output "$BASE/conservative" --dry-run \
   --content-mode temporal-cv --boundary-mode scene \
   --boundary-threshold 0.55 --boundary-min-segment 2 \
   --motion-diagnostics
 
 # 旧策略对照，不载入已验证召回下降的 model-v1
-video-incese --input "$SRC" --output "$BASE/old-cuts" \
+video-incese --input "$SRC" --output "$BASE/old-cuts" --dry-run \
   --content-mode temporal-cv --boundary-mode scene \
   --boundary-threshold 0.42 --boundary-min-segment 0.85
 
 # 彻底关闭视觉场景切割，保留时序内容判定
-video-incese --input "$SRC" --output "$BASE/no-cuts" \
+video-incese --input "$SRC" --output "$BASE/no-cuts" --dry-run \
   --content-mode temporal-cv --boundary-mode off
 ```
 
