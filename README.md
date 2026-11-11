@@ -1,10 +1,51 @@
-# video-incese · v0.4.0
+# video-incese · v0.5.0
 
 **目标**：从原始长视频中保留同时呈现白模动作视频和渲染后视频的连续 MP4 区间。正式产物始终是原始画面 MP4，JPG 只是通过 `--evidence` 明确启用时的审计证据。
 
+
+## v0.5.0：基于 Deep Research 的第一阶段修正（基线与安全防过切）
+
+本版本实现了研究报告中**已经可依据工程事实安全落地**的部分：
+
+- **评估 CLI** `video-incese-eval`：从原片时间轴的人工正例、已复核负例与自动输出 `report.json` 计算正例时间召回、已确认负例误收、逐段覆盖、IoU≥0.5 一对一匹配、匹配后边界误差以及过切/错合并情况。未标注时间一律是 **UNKNOWN**，不得自动算负例；没有完整真值时不输出全局 precision。
+- **防过切**：默认场景变化分数阈值从 `0.42` 调到 `0.55`，新增 `--boundary-min-segment 2`，保证仅因场景切点生成的每段至少 2 秒。属于**待原片验证的保守候选策略**，不能以“切出更少 MP4”证明效果提高。保留完整已接受总时长。`--boundary-mode off` 完全跳过场景边界；要复现 v0.4 的场景切点参数，用 `--boundary-threshold 0.42 --boundary-min-segment 0.85`。
+- **动作对应性实验信号**：可选 `--motion-diagnostics`，在每个有有效双区域布局的时序窗口中输出 `motion_correspondence`（双区域帧差强度曲线相关系数/采样对数/状态）。运动相关性可能由镜头运动、同步场景切换等引起；**不等于动作内容匹配**，且绝不改变窗口 accepted/rejected，也不修改现有学习模型的 11 维特征版本。
+- **控制风险**：没有直接添加 ORB、CLIP、姿态模型的自动拒绝门槛。它们对跨域白模与彩色渲染的关联效果尚未在独立真实视频上证实；错误硬拒绝可能进一步降低召回。
+
+详细评估标注格式、CLI 和工程验收参见 [docs/EVALUATION.md](docs/EVALUATION.md)。
+
+### Mac 运行（建议 Python 3.12）
+
+```bash
+# 已在 video-incese 源码仓库内；.venv312 是建议使用的本地虚拟环境
+git pull --ff-only origin main
+source .venv312/bin/activate
+python -m pip install -e '.[dev]'
+python -m pytest -q
+```
+
+```bash
+SRC="/Users/muse/Downloads/白模/原片2/原片2.mp4"
+BASE="$HOME/Movies/video-incese-v050"
+video-incese --input "$SRC" --output "$BASE/conservative" \
+  --content-mode temporal-cv --boundary-mode scene \
+  --boundary-threshold 0.55 --boundary-min-segment 2 \
+  --motion-diagnostics
+
+# 旧策略对照，不载入已验证召回下降的 model-v1
+video-incese --input "$SRC" --output "$BASE/old-cuts" \
+  --content-mode temporal-cv --boundary-mode scene \
+  --boundary-threshold 0.42 --boundary-min-segment 0.85
+
+# 彻底关闭视觉场景切割，保留时序内容判定
+video-incese --input "$SRC" --output "$BASE/no-cuts" \
+  --content-mode temporal-cv --boundary-mode off
+```
+
+只有对照人工 28 段并检查未知区域后，才能判定新版优于 v0.4。当前 28 段来自开发原片2，不是独立测试集；新原片应按源视频分组留作最终验收。
 ## 当前实现与限制
 
-默认使用 **temporal-cv**：OpenCV 检查 PiP / 左右分屏候选，分析两个区域的运动和光流，将有效时序窗口交给独立场景边界检测器。边界检测器只检查已接受区间的双区域突变，并在有证据的切点处拆分；再用 FFmpeg 导出 MP4。不调用 Ollama 或 GPU。
+默认使用 **temporal-cv**：OpenCV 检查 PiP / 左右分屏候选并分析双区域运动/光流；独立场景边界检测器只拆分被接受的区间；再由 FFmpeg 导出 MP4。v0.5.0 新增保守短段约束、显式标注评估工具、可选运动相关性诊断。不调用 Ollama 或 GPU。
 
 **严格边界**：该模式只识别有持续动态内容的两个区域，并不能单凭运动证明“白模对应渲染视频”、区分两个碰巧同时动的教程窗口；对静止白模、低动作幅度或布局移动的场景可能漏检。结果是**时序候选**，需要用人工标注验收；不能声称真实准确率已经改善。
 
