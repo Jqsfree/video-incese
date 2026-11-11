@@ -1,4 +1,4 @@
-# video-incese · v0.3.0
+# video-incese · v0.3.1
 
 **目标**：从原始长视频中保留同时呈现白模动作视频和渲染后视频的连续 MP4 区间。正式产物始终是原始画面 MP4，JPG 只是通过 `--evidence` 明确启用时的审计证据。
 
@@ -78,3 +78,36 @@ video-incese \
 - 运行时间和误收率尚未在用户的完整真实视频上实测，不给出未经证实的性能承诺。
 
 技术研究依据见 [研究 RFC](docs/temporal-video-segmentation-rfc.md)。
+
+## 将人工剪辑直接导入正例（v0.3.1）
+
+已有人工确认的纯正例 MP4 时，不必把它重新人工拆成 1 秒标签。使用
+`video-incese-learn import-positive`，以原视频每秒的时序证据生成报告和
+人工正例标签；不调用 Ollama。为防止剪辑边缘污染和布局误识别，边缘窗口或
+没有检测到布局的窗口标记为 `unsure`，**不是强行标成负例**。程序也会统计
+“人工保留但当前时序规则拒绝”的窗口，帮助诊断漏检。
+
+```bash
+video-incese-learn import-positive \
+  --clip "/path/to/manual-1.mp4" \
+  --clip "/path/to/manual-2.mp4" \
+  --clip "/path/to/manual-3.mp4" \
+  --clip "/path/to/manual-4.mp4" \
+  --confirmed-reviewed \
+  --reports-dir "$HOME/Movies/video-incese-gold/reports" \
+  --output "$HOME/Movies/video-incese-gold/positive-labels.csv"
+```
+
+注意：
+
+- `--confirmed-reviewed` 明确表示四段内容已经由人确认属于应保留的视频；
+  禁止将程序自己切出的片段未经复核当作正例导入。
+- `positive-labels.csv` 的 `keep` 是剪辑级人工标签向内部窗口的映射。
+  存在慢动作/人物停顿的窗口也可能被标记为 keep，正是需要学习的正例。
+- 这些片段 **只有正例没有负例**；要真正训练第二轮，需要用完整原片的
+  `video-incese-learn queue` 选择负例并人工填写 `reject`。然后执行：
+  `video-incese-learn train --labels positive-labels.csv --labels round1/review.csv --output model-v2.json`。
+- 短视频之间的相邻窗口高度相关。不可随机按窗口划分训练集/测试集；
+  最好按原片分组，至少把其中一条完整原片留作从未参与训练的独立验证集。
+- 未提供原片时无法将这些剪辑的起止时间映射回长视频，无法计算长视频整体召回率。
+- 保持原始人工剪辑 MP4 不变；只生成标注 CSV 与报告 JSON，避免上传私人视频到公共 GitHub。
