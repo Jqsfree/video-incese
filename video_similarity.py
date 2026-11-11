@@ -117,12 +117,18 @@ def _read_window(cap: cv2.VideoCapture, start: float, end: float, fps: float
     duration = end - start
     count = max(4, int(math.ceil(duration * fps)) + 1)
     edge = min(.03, duration / 8)
+    from video_temporal_cv import _frame
+    fps_native = cap.get(cv2.CAP_PROP_FPS)
+    nframes = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    final_frame = ((nframes - 1) / fps_native
+                   if fps_native > 0 and nframes > 0 else None)
     result = []
     for t in np.linspace(start + edge, end - edge, count):
-        cap.set(cv2.CAP_PROP_POS_MSEC, max(0., float(t)) * 1000)
-        ok, frame = cap.read()
-        if not ok or frame is None:
-            raise RuntimeError(f"Cannot decode video at {t:.3f}s")
+        # Container duration can extend past the last decodable video frame.
+        # Retry only near the TRUE video tail; do not conceal mid-file errors.
+        near_tail = (final_frame is not None and
+                     final_frame - .05 <= float(t) <= final_frame + .45)
+        frame, _ = _frame(cap, float(t), near_file_end=near_tail)
         result.append(frame)
     return result
 
