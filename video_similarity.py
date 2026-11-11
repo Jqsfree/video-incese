@@ -377,10 +377,14 @@ def scan_windows(source: Path, profile: dict, settings: object, *,
                 frames = _read_window(cap, start, end, fps)
                 geometry = _geometry(frames, settings)
                 best = None
+                hypotheses = []
                 # Both hypotheses run even when the geometric classifier returns none
                 # or the wrong region; original layout gating is NOT repeated here.
                 for layout in ("pip", "split"):
                     features = _descriptor(frames, layout, settings)
+                    # Retain BOTH possibilities so future ranking experiments
+                    # can replay all scoring strategies without decoding MP4.
+                    hypotheses.append({"layout": layout, "features": features})
                     similarity, cases = _score_features(
                         features, profile, layout, strategy=strategy)
                     _, passes_rule = rule_score({
@@ -398,6 +402,7 @@ def scan_windows(source: Path, profile: dict, settings: object, *,
                     if best is None or (candidate["similarity"], candidate["layout_agrees"]) > (
                             best["similarity"], best["layout_agrees"]):
                         best = candidate
+                best["hypotheses"] = hypotheses
                 windows.append(best)
             except (ValueError, RuntimeError, cv2.error) as exc:
                 failures.append({"start": start, "end": end, "error": str(exc)})
@@ -412,6 +417,7 @@ def scan_windows(source: Path, profile: dict, settings: object, *,
         "exclude_reviewed": exclude_reviewed,
         "score_is_probability": False,
         "similarity_strategy": strategy,
+        "hypotheses_retained_for_offline_replay": True,
     }
 
 
