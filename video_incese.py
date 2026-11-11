@@ -57,6 +57,8 @@ class Settings:
     boundary_tolerance: float = 0.125
     motion_delta: float = 0.3
     motion_min: float = 0.02
+    motion_residual_min: float = 0.012
+    motion_consistency: float = 0.5
     ollama_timeout: float = 300.0
     ollama_num_predict: int = 192
     ollama_think: bool = False
@@ -304,9 +306,10 @@ def verify_ollama_frames(
         encoded.append(base64.b64encode(jpg.tobytes()).decode("ascii"))
     prompt = (
         "Three images show chronological frames from one continuous video interval. "
-        "Evaluate whether there are TWO SIMULTANEOUS VIDEO regions: (1) a 3D reference "
-        "model, motion capture, or reference character/action ANIMATION and (2) an AI-"
-        "GENERATED output video depicting the CORRESPONDING character or action. "
+        "Accept ONLY when there are TWO SIMULTANEOUS MOVING VIDEO REGIONS: "
+        "(1) an untextured white/clay/wireframe/simplified 3D model or reference "
+        "character visibly ANIMATING, and (2) its corresponding generated/finished "
+        "RENDERED VIDEO. The subject and action must correspond across time. "
         "Both regions must show temporal movement across the images. "
         "A website, browser, AI generator UI, Blender editor/tutorial, static character "
         "reference image, still collage, gameplay with webcam, text, or two unrelated "
@@ -501,6 +504,10 @@ def parser() -> argparse.ArgumentParser:
                    help="Half-width in seconds of three-frame motion observation")
     p.add_argument("--motion-min", type=float, default=0.02,
                    help="Minimum changed pixel ratio in BOTH video regions")
+    p.add_argument("--motion-residual-min", type=float, default=0.012,
+                   help="Minimum non-global optical-flow residual ratio per panel")
+    p.add_argument("--motion-consistency", type=float, default=0.5,
+                   help="Fraction of adjacent frame pairs showing local motion (min two pairs)")
     p.add_argument("--ollama-timeout", type=float, default=300.0,
                    help="Seconds to wait for one local vision request (default: 300)")
     p.add_argument("--ollama-num-predict", type=int, default=192,
@@ -521,7 +528,9 @@ def main(argv: list[str] | None = None) -> int:
         if not (.2 <= settings.semantic_step <= 10
                 and .025 <= settings.boundary_tolerance <= .5
                 and .1 <= settings.motion_delta <= 1
-                and 0 <= settings.motion_min <= .5):
+                and 0 <= settings.motion_min <= .5
+                and 0 <= settings.motion_residual_min <= .5
+                and .25 <= settings.motion_consistency <= 1):
             raise ValueError("Invalid semantic step, boundary tolerance, motion delta or motion minimum")
         if not (5 <= settings.ollama_timeout <= 3600 and 64 <= settings.ollama_num_predict <= 2048):
             raise ValueError("Require 5 <= ollama-timeout <= 3600 and 64 <= ollama-num-predict <= 2048")
