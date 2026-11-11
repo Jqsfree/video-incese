@@ -490,7 +490,12 @@ def process_file(source: Path, target: Path, settings: Settings) -> dict:
             entry["output"] = str(out)
     finally:
         cap.release()
-    report = {"input": str(source.resolve()), "video": info, "settings": asdict(settings),
+    serialized_settings = asdict(settings)
+    if settings.learned_model is not None:
+        serialized_settings["learned_model"] = str(settings.learned_model.expanduser().resolve())
+        temporal_stats["learned_model_version"] = model.get("model_version")
+        temporal_stats["label_fingerprint"] = model.get("label_fingerprint")
+    report = {"input": str(source.resolve()), "video": info, "settings": serialized_settings,
               "sampling": sampling, "warnings": warnings,
               "samples": [asdict(o) for o in observations], "clips": clips,
               "source_candidates": len(candidates), "verification_trace": verification_trace,
