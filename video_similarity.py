@@ -517,6 +517,50 @@ def run_scan(source: Path, profile: dict, output: Path, settings: object, *,
     return result
 
 
+def evaluate_ranking(ranking: dict, truth: Path, *,
+                     top_k: tuple[int, ...] = (10, 20, 50)) -> dict:
+    """Positive coverage at K, not classification precision@K without negatives."""
+    from video_evaluate import evaluate
+    source = ranking.get("input")
+    if not source or not isinstance(ranking.get("ranked"), list):
+        raise ValueError("Expected ranking.json with input and ranked entries")
+    duration = _finite(ranking.get("scan", {}).get("duration"), "ranking duration")
+    positives = load_positives(truth, expected_filename=Path(source).name,
+                               duration=duration)
+    cases = [{"start": x["start"], "end": x["end"]} for x in positives]
+    rows = sorted(ranking["ranked"], key=lambda r: r["rank"])
+    outputs = []
+    for k in top_k:
+        if k < 1:
+            raise ValueError("Top-K values must be positive")
+        report = {"input": source, "video": {"duration": duration},
+                  "clips": [{"start": r["start"], "end": r["end"],
+                             "status": "dry_run"} for r in rows[:k]]}
+        metrics = evaluate(report, {"source": Path(source).name,
+                                    "positives": cases, "negatives": []})
+        outputs.append({
+            "top_k": k, "retrieved_clips": min(k, len(rows)),
+            "annotated_positive_time_recall": metrics["positive_time_recall"],
+            "one_to_one_iou_matches": metrics["one_to_one_iou_matches"],
+            "split_positive_cases": metrics["split_positive_cases"],
+            "merged_positive_cases_in_prediction": metrics["merged_positive_cases_in_prediction"],
+            "precision_at_k": None,
+        })
+    return {
+        "evaluation_version": "positive-ranking-eval-v1",
+        "source": source,
+        "manual_positive_cases": len(positives),
+        "same_source_as_training": ranking.get("scan", {}).get("same_source_as_training"),
+        "results": outputs,
+        "limitations": (
+            "Positive time recall@K uses reviewed positives only. "
+            "Unreviewed predictions are UNKNOWN, not false positives. "
+            "Precision@K is undefined without reviewed negatives. "
+            "Results on the training source are development retrieval, NOT blind-test accuracy."
+        ),
+    }
+
+
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Human-positive features -> full timeline -> similarity ranked clips")
     sub = p.add_subparsers(dest="command", required=True)
@@ -542,6 +586,12 @@ def parser() -> argparse.ArgumentParser:
                       help="Export this many highest-ranked clips; 0=rank only")
     scan.add_argument("--exclude-reviewed", action="store_true",
                       help="Exclude annotated positive times when rescanning the EXACT training source")
+
+    ev = sub.add_parser("evaluate", help="Positive-only recall and one-to-one case IoU at Top-K")
+    ev.add_argument("--ranking", required=True, type=Path, help="ranking.json from scan")
+    ev.add_argument("--truth", required=True, type=Path, help="Human-reviewed absolute-time JSON")
+    ev.add_argument("--output", type=Path, help="Optional evaluation JSON")
+    ev.add_argument("--top-k", type=int, nargs="+", default=[10, 20, 50])
     return p
 
 
@@ -551,7 +601,15 @@ def main(argv: list[str] | None = None) -> int:
     settings = Settings(content_mode="temporal-cv", boundary_threshold=.48,
                         boundary_min_segment=2.0)
     try:
-        if args.command == "build":
+        if args.command == "evaluate":
+            ranking = json.loads(args.ranking.read_text(encoding="utf-8"))
+            result = evaluate_ranking(ranking, args.truth, top_k=tuple(args.top_k))
+            printed = json.dumps(result, ensure_ascii=False, indent=2)
+            if args.output:
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                args.output.write_text(printed + "\n", encoding="utf-8")
+            print(printed)
+        elif args.command == "build":
             profile = build_profile(args.source, args.truth, settings,
                                     step=args.step, fps=args.fps)
             args.output.parent.mkdir(parents=True, exist_ok=True)
