@@ -192,6 +192,17 @@ def _extract_profile_cases(source: Path, positives: list[dict], settings: object
     return cases, failures
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while True:
+            block = stream.read(1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def _feature_scales(cases: list[dict]) -> dict[str, float]:
     # Cases contribute equally, regardless of the number of video windows.
     means = []
@@ -222,6 +233,7 @@ def build_profile(source: Path, truth: Path, settings: object, *,
     return {
         "profile_version": PROFILE_VERSION, "feature_version": FEATURE_VERSION,
         "training_source": source.name, "training_duration": round(info["duration"], 3),
+        "training_file_sha256": _sha256(source),
         "annotation_sha256": hashlib.sha256(annotated_bytes).hexdigest(),
         "annotation_basename": truth.name,
         "selection": "positive-only_per-case_nearest_examples",
@@ -298,7 +310,8 @@ def scan_windows(source: Path, profile: dict, settings: object, *,
     if not (.75 <= step <= 10 and 2 <= fps <= 10):
         raise ValueError("Scan step must be .75..10s; fps 2..10")
     same_source = (profile["training_source"] == source.name
-                   and abs(float(profile["training_duration"]) - info["duration"]) <= .1)
+                   and abs(float(profile["training_duration"]) - info["duration"]) <= .1
+                   and profile.get("training_file_sha256") == _sha256(source))
     if exclude_reviewed and not same_source:
         raise ValueError("--exclude-reviewed requires the original training source")
     reviewed = [(c["start"], c["end"]) for c in profile["cases"]] if exclude_reviewed else []
@@ -402,8 +415,10 @@ def rank_segments(windows: list[dict], settings: object,
                 cid = match["case_id"]
                 closest[cid] = max(closest.get(cid, 0), match["similarity"])
         matched = sorted(closest.items(), key=lambda x: (-x[1], x[0]))[:3]
+        layout_counts = Counter(w["layout"] for _, w in active)
         ranked.append({
             **piece, "duration": round(b-a, 3),
+            "layout": layout_counts.most_common(1)[0][0],
             "similarity": round(similarity, 5),
             "top_reference_cases": [{"case_id": cid, "similarity": score}
                                     for cid, score in matched],
