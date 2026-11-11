@@ -69,7 +69,7 @@ def test_semantic_rejects_geometry_only_static_window(make_video, tmp_path):
 def test_mixed_sequence_finds_separate_spans_and_no_bridging(make_video, tmp_path, monkeypatch):
     src = make_video([(0, 10)])
     # Synthetic frames are static; make motion prefilter pass to isolate time segmentation.
-    monkeypatch.setattr(content, "motion_pair", lambda *args: (.5, .5))
+    monkeypatch.setattr(content, "temporal_motion", lambda *args, **kw: (.5, .5, True, {}))
     def semantic(frames, model):
         # Marker encoded by test monkeypatch to _capture from its requested timestamp.
         t = float(frames[1][0, 0, 0]) / 10.0
@@ -94,7 +94,7 @@ def test_mixed_sequence_finds_separate_spans_and_no_bridging(make_video, tmp_pat
 @needs_ffmpeg
 def test_semantic_vlm_failure_reports_error_and_no_export(make_video, tmp_path, monkeypatch):
     src = make_video([(2, 8)])
-    monkeypatch.setattr(content, "motion_pair", lambda *args: (.4, .4))
+    monkeypatch.setattr(content, "temporal_motion", lambda *args, **kw: (.4, .4, True, {}))
     def broken(frames, model, **kwargs):
         raise RuntimeError("mock Ollama unavailable")
     monkeypatch.setattr(v, "verify_ollama_frames", broken)
