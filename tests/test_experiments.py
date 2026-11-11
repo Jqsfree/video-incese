@@ -111,7 +111,7 @@ def test_controlled_benchmark_no_precision_from_unknown(tmp_path):
     result = e.benchmark(_profile(), _ranking(), truth,
                          strategies=("balanced", "top3", "motion"),
                          smoothing=("off", "median3"), top_k=(1, 3),
-                         min_duration=2)
+                         budget_windows=3, min_duration=2)
     assert result["budget_window_count"] == 3
     assert len(result["trials"]) == 6
     assert result["same_source_as_training"] is True
@@ -154,7 +154,7 @@ def test_benchmark_cli_files_are_reproducible_without_video(tmp_path):
     rc = e.main(["--profile", str(profile), "--ranking", str(ranking),
                  "--truth", str(truth), "--output", str(out),
                  "--strategies", "balanced", "centroid", "--smoothing", "off",
-                 "--top-k", "1", "2"])
+                 "--top-k", "1", "2", "--budget-windows", "3"])
     assert rc == 0
     saved = json.loads((out / "experiments.json").read_text())
     assert saved["budget_window_count"] == 3
@@ -168,3 +168,54 @@ def test_wrong_truth_source_fails_closed(tmp_path):
                                  "positives": [{"start": 2, "end": 4}]}))
     with pytest.raises(ValueError):
         e.benchmark(_profile(), _ranking(), truth)
+
+
+def test_default_sparse_budget_sweep_avoids_near_entire_video(tmp_path):
+    truth = tmp_path / "truth.json"
+    truth.write_text(json.dumps({
+        "source": "source.mp4",
+        "positives": [{"start": 2, "end": 6}]}))
+    ranking = _ranking()
+    # Simulates the uploaded experiment's failure mode: 99.8% of
+    # baseline windows pass the old score threshold.
+    for w in ranking["windows"]:
+        w["similarity"] = .8
+    result = e.benchmark(_profile(), ranking, truth,
+                         strategies=("balanced", "motion"), smoothing=("off",),
+                         top_k=(1, 3))
+    assert result["baseline_selected_windows"] == 5
+    assert result["budget_window_counts"] == [1, 2]
+    assert result["budget_window_count"] is None
+    assert len(result["trials"]) == 4
+    assert all(t["selected_windows"] <= 2 for t in result["trials"])
+    assert any("saturated" in warning for warning in result["warnings"])
+    assert all("selected_window_positive_time_recall" in t for t in result["trials"])
+
+
+def test_explicit_multiple_window_budgets_and_unknown_precision(tmp_path):
+    truth = tmp_path / "truth.json"
+    truth.write_text(json.dumps({
+        "source": "source.mp4",
+        "positives": [{"start": 2, "end": 6}]}))
+    result = e.benchmark(_profile(), _ranking(), truth,
+                         budgets=(2, 4), strategies=("nearest",),
+                         smoothing=("off", "median3"), top_k=(1, 2))
+    assert result["budget_window_counts"] == [2, 4]
+    assert result["budget_window_count"] is None
+    assert len(result["trials"]) == 4
+    assert {t["selected_windows"] for t in result["trials"]} == {2, 4}
+    assert all(m["precision_at_k"] is None
+               for t in result["trials"] for m in t["metrics"])
+
+
+@pytest.mark.parametrize("budgets, single", [
+    ((1, 2), 3), ((), None), ((0,), None), ((6,), None),
+])
+def test_budget_contract_rejects_conflicts_and_out_of_range(tmp_path, budgets, single):
+    truth = tmp_path / "truth.json"
+    truth.write_text(json.dumps({
+        "source": "source.mp4",
+        "positives": [{"start": 2, "end": 6}]}))
+    with pytest.raises(ValueError):
+        e.benchmark(_profile(), _ranking(), truth,
+                    budgets=budgets, budget_windows=single)
