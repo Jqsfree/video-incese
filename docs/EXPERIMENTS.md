@@ -36,6 +36,24 @@ video-incese-experiment \
   --top-k 10 20 50
 ```
 
+**本次实测发现 v0.6 相似度阈值0.62接受了477/478个窗口（99.8%），导致几乎整片合并为2个超长片段，时间召回100%但一对一案例IoU匹配为0。那一组结果不能据此比较排序策略。**
+
+实验工具现已修正：**默认自动比较每个方法前10%、20%、30%、40%的窗口**，而不是拿几乎整片通过的0.62阈值反推窗口预算。对于478个窗口，对应约48/96/143/191个窗口；每档都在5种策略和两种平滑方法之间使用相同预算。输出增加 `selected_window_positive_recall`（筛选窗口层的正例召回）与 `positive_time_recall`（合并成候选片段后、Top-K层的正例召回），避免把合并成长片误认为检索精准。
+
+可以通过下面的命令显式控制不同的窗口预算，推荐比较50/100/150/200，而**不是477**：
+
+```bash
+video-incese-experiment \
+  --ranking "$OUT/original2-scan/ranking.json" \
+  --profile "$OUT/positive-profile.json" \
+  --truth "$TRUTH" \
+  --output "$OUT/budget-sweep" \
+  --budgets 50 100 150 200 \
+  --top-k 10 20 50
+```
+
+如果只要单个预算，也仍支持旧选项 `--budget-windows 80`。
+
 如需控制相同的候选窗口预算，例如只允许 80 个窗口：
 ```bash
 video-incese-experiment \
@@ -50,7 +68,7 @@ video-incese-experiment \
 如果 `ranking.json` 是用 v0.6 生成，它只保存了原先选中的 PiP 或 split 布局特征，因此**重算各策略时使用固定区域假设**；新版本扫描才会同时保存两个布局，供公平重放。
 
 输出：
-- `experiments.csv`：按 5 种策略×2 种平滑方式×TopK 输出的对照表。
+- `experiments.csv`：按 5 种策略×2 种平滑方式×多个窗口预算×TopK 输出的对照表。
 - `experiments.json`：样本预算、是否有完整布局假设、各策略 Top10 候选时间、召回/一对一 IoU/拆分/合并指标，以及验证限制。
 
 **公平约束**：所有方法选择的窗口数量相同；不同的相邻窗口如何合并仍会造成最终 MP4 数量/总时长不同。实验统一关闭视觉场景切割，以便先单独比较检索排序。实际“案例从哪里开始和结束”属于下一阶段边界专门实验。若需要正式输出，另用 `video-incese-rank scan` 进行实际视频扫描。
