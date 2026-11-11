@@ -237,6 +237,19 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--output", type=Path, required=True)
     q.add_argument("--budget", type=int, default=24)
     q.add_argument("--preview-dir", type=Path, help="Optional MP4 clips for reviewed windows")
+    im = sub.add_parser("import-positive", help="Import human-reviewed positive MP4 clips as labels")
+    im.add_argument("--clip", type=Path, action="append", required=True,
+                    help="Repeat for each human-cut positive video")
+    im.add_argument("--output", type=Path, required=True,
+                    help="Output reviewable positive labels CSV")
+    im.add_argument("--reports-dir", type=Path, required=True,
+                    help="Where to write per-clip temporal feature reports")
+    im.add_argument("--confirmed-reviewed", action="store_true",
+                    help="Explicitly confirm entire clip content is a human-verified positive")
+    im.add_argument("--temporal-step", type=float, default=1.0)
+    im.add_argument("--temporal-fps", type=float, default=4.0)
+    im.add_argument("--edge-trim", type=float, default=0.25,
+                    help="Leave boundary windows unsure (default 0.25s margin)")
     t = sub.add_parser("train", help="Train from edited human labels; no pseudo-labels")
     t.add_argument("--labels", type=Path, action="append", required=True)
     t.add_argument("--output", type=Path, required=True)
@@ -244,6 +257,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "queue":
             result = queue(args.report, args.output, args.budget, args.preview_dir)
+        elif args.command == "import-positive":
+            from video_positive import import_positives
+            result = import_positives(
+                args.clip, args.output, args.reports_dir,
+                confirmed_reviewed=args.confirmed_reviewed,
+                temporal_step=args.temporal_step, temporal_fps=args.temporal_fps,
+                edge_trim=args.edge_trim)
         else:
             result = train(args.labels, args.output)
         print(json.dumps(result, ensure_ascii=False))
