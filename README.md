@@ -19,10 +19,10 @@ source .venv/bin/activate
 python -m pip install -e '.[dev]'
 python -m pytest -q
 
-video-incese \\
-  --input "/Users/muse/Downloads/白模/原片1/原片1.mp4" \\
-  --output "$HOME/Movies/video-incese-round1" \\
-  --content-mode temporal-cv \\
+video-incese \
+  --input "/Users/muse/Downloads/白模/原片1/原片1.mp4" \
+  --output "$HOME/Movies/video-incese-round1" \
+  --content-mode temporal-cv \
   --sample-fps 2 --temporal-fps 4 --temporal-step 1
 ```
 
@@ -35,10 +35,10 @@ video-incese \\
 ### 第 1 轮：生成复核队列
 
 ```bash
-video-incese-learn queue \\
-  --report "$HOME/Movies/video-incese-round1/report.json" \\
-  --output "$HOME/Movies/video-incese-round1/review.csv" \\
-  --budget 24 \\
+video-incese-learn queue \
+  --report "$HOME/Movies/video-incese-round1/report.json" \
+  --output "$HOME/Movies/video-incese-round1/review.csv" \
+  --budget 24 \
   --preview-dir "$HOME/Movies/video-incese-round1/review-mp4"
 ```
 
@@ -49,15 +49,15 @@ video-incese-learn queue \\
 至少 12 个已标注窗口，且每类不少于 4 个，才允许训练，防止极少量单类样本导致失控。训练不会改变旧模型或已有视频，必须明确运行：
 
 ```bash
-video-incese-learn train \\
-  --labels "$HOME/Movies/video-incese-round1/review.csv" \\
+video-incese-learn train \
+  --labels "$HOME/Movies/video-incese-round1/review.csv" \
   --output "$HOME/Movies/video-incese-model-v1.json"
 
-video-incese \\
-  --input "/Users/muse/Downloads/白模/原片1/原片1.mp4" \\
-  --output "$HOME/Movies/video-incese-round2" \\
-  --content-mode temporal-cv \\
-  --learned-model "$HOME/Movies/video-incese-model-v1.json" \\
+video-incese \
+  --input "/Users/muse/Downloads/白模/原片1/原片1.mp4" \
+  --output "$HOME/Movies/video-incese-round2" \
+  --content-mode temporal-cv \
+  --learned-model "$HOME/Movies/video-incese-model-v1.json" \
   --learned-threshold 0.6
 ```
 
